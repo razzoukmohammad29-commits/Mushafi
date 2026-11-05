@@ -13,7 +13,8 @@ jobs:
 
       - name: Extract ZIP
         run: |
-          unzip Mushafi.zip -d extracted_project
+          mkdir -p extracted_project
+          unzip -q Mushafi.zip -d extracted_project
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -21,14 +22,20 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
       - name: Build APK with Gradle
-        working-directory: extracted_project
         run: |
-          chmod +x gradlew
-          ./gradlew assembleDebug
+          PROJECT_DIR=$(dirname "$(find extracted_project -name "settings.gradle*" | head -n 1)")
+          cd "$PROJECT_DIR"
+          gradle assembleDebug --no-daemon
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: app-debug
-          path: extracted_project/app/build/outputs/apk/debug/app-debug.apk
+          path: |
+            **/*/build/outputs/apk/debug/app-debug.apk

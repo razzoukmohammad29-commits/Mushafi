@@ -11,10 +11,51 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Extract ZIP
+      - name: Extract and Organize Project
         run: |
           mkdir -p extracted_project
           unzip -q Mushafi.zip -d extracted_project
+          echo "=== Files inside ZIP ==="
+          find extracted_project -type f
+
+          mkdir -p clean_project/app/src/main/java/com/example/mushafi
+
+          MAIN_FILE=$(find extracted_project -type f -iname "*MainActivity*" | head -n 1)
+          if [ -n "$MAIN_FILE" ]; then
+            cp "$MAIN_FILE" clean_project/app/src/main/java/com/example/mushafi/MainActivity.kt
+          fi
+
+          MANIFEST_FILE=$(find extracted_project -type f -iname "*Manifest*.xml" | head -n 1)
+          if [ -n "$MANIFEST_FILE" ]; then
+            cp "$MANIFEST_FILE" clean_project/app/src/main/AndroidManifest.xml
+          fi
+
+          SETTINGS_FILE=$(find extracted_project -type f -iname "*settings*gradle*" | head -n 1)
+          if [ -n "$SETTINGS_FILE" ]; then
+            cp "$SETTINGS_FILE" clean_project/settings.gradle.kts
+          fi
+          if [ ! -s clean_project/settings.gradle.kts ]; then
+            printf 'pluginManagement {\n  repositories {\n    google()\n    mavenCentral()\n    gradlePluginPortal()\n  }\n}\ndependencyResolutionManagement {\n  repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)\n  repositories {\n    google()\n    mavenCentral()\n  }\n}\nrootProject.name = "Mushafi"\ninclude(":app")\n' > clean_project/settings.gradle.kts
+          fi
+
+          PROPS_FILE=$(find extracted_project -type f -iname "*gradle*properties*" | head -n 1)
+          if [ -n "$PROPS_FILE" ]; then
+            cp "$PROPS_FILE" clean_project/gradle.properties
+          fi
+          if [ ! -s clean_project/gradle.properties ]; then
+            printf 'org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8\nandroid.useAndroidX=true\nandroid.nonTransitiveRClass=true\n' > clean_project/gradle.properties
+          fi
+
+          while IFS= read -r f; do
+            if grep -q -E "compileSdk|applicationId|dependencies" "$f"; then
+              cp "$f" clean_project/app/build.gradle.kts
+            else
+              cp "$f" clean_project/build.gradle.kts
+            fi
+          done < <(find extracted_project -type f -iname "*build*gradle*")
+
+          echo "=== Final Organized Structure ==="
+          find clean_project -type f
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -28,14 +69,12 @@ jobs:
           gradle-version: '8.7'
 
       - name: Build APK with Gradle
+        working-directory: clean_project
         run: |
-          PROJECT_DIR=$(dirname "$(find extracted_project -name "settings.gradle*" | head -n 1)")
-          cd "$PROJECT_DIR"
           gradle assembleDebug --no-daemon
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: app-debug
-          path: |
-            **/*/build/outputs/apk/debug/app-debug.apk
+          path: clean_project/app/build/outputs/apk/debug/app-debug.apk

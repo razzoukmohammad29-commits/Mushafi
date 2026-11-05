@@ -17,8 +17,25 @@ jobs:
           unzip -q Mushafi.zip -d extracted_project
 
           mkdir -p clean_project/app/src/main/java/com/example/mushafi
+          mkdir -p clean_project/app/src/main/res/mipmap-hdpi
+          mkdir -p clean_project/app/src/main/res/mipmap-mdpi
+          mkdir -p clean_project/app/src/main/res/mipmap-xhdpi
+          mkdir -p clean_project/app/src/main/res/mipmap-xxhdpi
+          mkdir -p clean_project/app/src/main/res/mipmap-xxxhdpi
 
-          # إنشاء كود Kotlin مستقر ونظيف يمنع الإغلاق المفاجئ والوميض
+          # تثبيت وتحجيم الأيقونة المرفوعة Frame.png لتناسب جميع مقاسات أندرويد
+          if [ -f "Frame.png" ]; then
+            sudo apt-get update -y && sudo apt-get install -y imagemagick
+            convert Frame.png -resize 72x72 clean_project/app/src/main/res/mipmap-hdpi/ic_launcher.png
+            convert Frame.png -resize 48x48 clean_project/app/src/main/res/mipmap-mdpi/ic_launcher.png
+            convert Frame.png -resize 96x96 clean_project/app/src/main/res/mipmap-xhdpi/ic_launcher.png
+            convert Frame.png -resize 144x144 clean_project/app/src/main/res/mipmap-xxhdpi/ic_launcher.png
+            convert Frame.png -resize 192x192 clean_project/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
+            # نسخها بصيغة round للأيقونات الدائرية أيضاً
+            cp clean_project/app/src/main/res/mipmap-xxhdpi/ic_launcher.png clean_project/app/src/main/res/mipmap-xxhdpi/ic_launcher_round.png
+          fi
+
+          # إنشاء كود Kotlin مستقر للشاشة الرئيسية
           cat << 'EOF' > clean_project/app/src/main/java/com/example/mushafi/MainActivity.kt
           package com.example.mushafi
 
@@ -140,6 +157,8 @@ jobs:
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <application
                   android:allowBackup="true"
+                  android:icon="@mipmap/ic_launcher"
+                  android:roundIcon="@mipmap/ic_launcher_round"
                   android:label="مصحفي"
                   android:supportsRtl="true"
                   android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">

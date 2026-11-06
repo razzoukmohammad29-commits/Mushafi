@@ -34,7 +34,7 @@ jobs:
             cp clean_project/app/src/main/res/mipmap-xxhdpi/ic_launcher.png clean_project/app/src/main/res/mipmap-xxhdpi/ic_launcher_round.png
           fi
 
-          # تحميل المصحف الكامل ودمج علامات الوقف مع الكلمات لعدم احتسابها ككلمات مستقلة
+          # تحميل المصحف الكامل ودمج علامات الوقف مع الكلمات
           cat << 'EOF' > fetch_quran.py
           import urllib.request
           import json
@@ -59,7 +59,6 @@ jobs:
                           pending_prefix = ""
                       merged.append(token)
                   else:
-                      # علامة وقف أو رمز قرآني مثل ۖ أو ۗ أو ۞: ندمجه مع الكلمة السابقة
                       if merged:
                           merged[-1] = merged[-1] + " " + token
                       else:
@@ -102,7 +101,12 @@ jobs:
           import android.Manifest
           import android.content.Intent
           import android.content.pm.PackageManager
+          import android.media.AudioAttributes
+          import android.media.AudioFormat
+          import android.media.AudioTrack
           import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
           import android.speech.RecognitionListener
           import android.speech.RecognizerIntent
           import android.speech.SpeechRecognizer
@@ -172,7 +176,66 @@ jobs:
               if (e == s) return true
               if (e.removePrefix("ال") == s.removePrefix("ال")) return true
               if (e.removePrefix("و") == s || s.removePrefix("و") == e) return true
+              if (e.removePrefix("ف") == s || s.removePrefix("ف") == e) return true
+              if (e.removePrefix("ب") == s || s.removePrefix("ب") == e) return true
               return false
+          }
+
+          // توليد صوت "دقة على الطاولة" (طرقة مزدوجة على الخشب) عند الخطأ
+          fun playTableKnockSound() {
+              Thread {
+                  try {
+                      val sampleRate = 22050
+                      val durationMs = 220
+                      val numSamples = (sampleRate * durationMs) / 1000
+                      val buffer = ShortArray(numSamples)
+
+                      for (i in 0 until numSamples) {
+                          val t = i.toDouble() / sampleRate
+                          var sample = 0.0
+                          if (t < 0.065) {
+                              val env = Math.exp(-t * 65.0)
+                              val wave = Math.sin(2.0 * Math.PI * 155.0 * t) * 0.75 +
+                                         Math.sin(2.0 * Math.PI * 310.0 * t) * 0.25
+                              sample = wave * env
+                          } else if (t >= 0.105 && t < 0.180) {
+                              val t2 = t - 0.105
+                              val env = Math.exp(-t2 * 55.0)
+                              val wave = Math.sin(2.0 * Math.PI * 145.0 * t2) * 0.80 +
+                                         Math.sin(2.0 * Math.PI * 290.0 * t2) * 0.20
+                              sample = wave * env
+                          }
+                          val pcmVal = (sample * Short.MAX_VALUE).toInt()
+                              .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                          buffer[i] = pcmVal.toShort()
+                      }
+
+                      val audioTrack = AudioTrack.Builder()
+                          .setAudioAttributes(
+                              AudioAttributes.Builder()
+                                  .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+                                  .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                                  .build()
+                          )
+                          .setAudioFormat(
+                              AudioFormat.Builder()
+                                  .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                                  .setSampleRate(sampleRate)
+                                  .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                                  .build()
+                          )
+                          .setBufferSizeInBytes(buffer.size * 2)
+                          .setTransferMode(AudioTrack.MODE_STATIC)
+                          .build()
+
+                      audioTrack.write(buffer, 0, buffer.size)
+                      audioTrack.play()
+                      Thread.sleep(250)
+                      audioTrack.release()
+                  } catch (e: Exception) {
+                      e.printStackTrace()
+                  }
+              }.start()
           }
 
           class MainActivity : ComponentActivity() {
@@ -251,17 +314,18 @@ jobs:
           }
 
           @Composable
-          fun NumberInputBox(
+          fun CompactNumberBox(
               value: String,
               onValueChange: (String) -> Unit,
               modifier: Modifier = Modifier
           ) {
               Box(
                   modifier = modifier
-                      .height(40.dp)
-                      .background(Color.White, RoundedCornerShape(8.dp))
-                      .border(1.dp, Color(0xFFA9DFBF), RoundedCornerShape(8.dp))
-                      .padding(horizontal = 8.dp),
+                      .width(52.dp)
+                      .height(32.dp)
+                      .background(Color.White, RoundedCornerShape(6.dp))
+                      .border(1.dp, Color(0xFFA9DFBF), RoundedCornerShape(6.dp))
+                      .padding(horizontal = 4.dp),
                   contentAlignment = Alignment.Center
               ) {
                   BasicTextField(
@@ -275,7 +339,7 @@ jobs:
                       keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                       textStyle = TextStyle(
                           color = Color(0xFF1B4F72),
-                          fontSize = 18.sp,
+                          fontSize = 14.sp,
                           fontWeight = FontWeight.Bold,
                           textAlign = TextAlign.Center
                       ),
@@ -288,6 +352,7 @@ jobs:
           fun QuranSmartScreen(pages: List<QuranPageData>) {
               val context = LocalContext.current
               val focusManager = LocalFocusManager.current
+              val mainHandler = remember { Handler(Looper.getMainLooper()) }
 
               var currentPageIndex by remember { mutableStateOf(0) }
               var pageInputText by remember { mutableStateOf("1") }
@@ -296,24 +361,19 @@ jobs:
               var isRecitationMode by remember { mutableStateOf(true) }
               var revealedWordCount by remember { mutableStateOf(0) }
               var hasErrorStop by remember { mutableStateOf(false) }
-              var isListening by remember { mutableStateOf(false) }
+
+              // متغير يحفظ رغبة المستخدم بالاستماع المتواصل حتى يضغط زر الإيقاف
+              var userWantsListening by remember { mutableStateOf(false) }
+              var utteranceCursor by remember { mutableStateOf(0) }
+              var lastKnockedWord by remember { mutableStateOf("") }
+
               var statusMessage by remember {
-                  mutableStateOf("حدد الصفحة أو الجزء، ثم ابدأ القراءة أو اضغط (أكمل) لكشف الكلمات")
+                  mutableStateOf("حدد الصفحة أو الجزء، ثم اضغط (ابدأ التسميع) للقراءة المتواصلة")
               }
 
               val currentPage = if (pages.isNotEmpty()) pages[currentPageIndex] else null
               val allPageWords = remember(currentPageIndex, pages) {
                   currentPage?.ayahs?.flatMap { it.words } ?: emptyList()
-              }
-
-              LaunchedEffect(currentPageIndex) {
-                  revealedWordCount = 0
-                  hasErrorStop = false
-                  if (currentPage != null) {
-                      pageInputText = currentPage.page.toString()
-                      juzInputText = currentPage.juz.toString()
-                      statusMessage = "أنت الآن في ${currentPage.surah} - صفحة ${currentPage.page} (الجزء ${currentPage.juz})"
-                  }
               }
 
               val speechRecognizer = remember {
@@ -322,98 +382,153 @@ jobs:
                   } else null
               }
 
-              DisposableEffect(Unit) {
-                  onDispose {
-                      speechRecognizer?.destroy()
+              fun startRecognizerCycle() {
+                  if (!userWantsListening || speechRecognizer == null) return
+                  utteranceCursor = 0
+                  lastKnockedWord = ""
+                  val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                      putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                      putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ar-SA")
+                      putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                      putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 4000L)
+                      putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
+                  }
+                  try {
+                      speechRecognizer.startListening(intent)
+                  } catch (e: Exception) {
+                      e.printStackTrace()
                   }
               }
 
-              fun processSpokenText(spokenSentence: String) {
+              fun scheduleRestartListening(delayMs: Long = 120L) {
+                  mainHandler.removeCallbacksAndMessages(null)
+                  if (userWantsListening && revealedWordCount < allPageWords.size) {
+                      mainHandler.postDelayed({
+                          if (userWantsListening && revealedWordCount < allPageWords.size) {
+                              startRecognizerCycle()
+                          }
+                      }, delayMs)
+                  }
+              }
+
+              fun evaluateSpokenWords(spokenSentence: String, isFinalResult: Boolean) {
                   if (allPageWords.isEmpty() || revealedWordCount >= allPageWords.size) return
                   val spokenWords = spokenSentence.trim()
                       .split(Regex("\\s+"))
                       .filter { normalizeArabicWord(it).isNotEmpty() }
                   if (spokenWords.isEmpty()) return
 
+                  if (utteranceCursor > spokenWords.size) {
+                      utteranceCursor = 0
+                  }
+
                   var matchedAny = false
-                  for (sw in spokenWords) {
-                      // تخطي أي رمز غير حرفي احتياطياً
+                  while (utteranceCursor < spokenWords.size && revealedWordCount < allPageWords.size) {
                       while (revealedWordCount < allPageWords.size &&
                           normalizeArabicWord(allPageWords[revealedWordCount]).isEmpty()
                       ) {
                           revealedWordCount++
                       }
+                      if (revealedWordCount >= allPageWords.size) break
 
-                      if (revealedWordCount < allPageWords.size) {
-                          val expectedWord = allPageWords[revealedWordCount]
-                          if (wordsMatch(expectedWord, sw)) {
-                              revealedWordCount++
-                              matchedAny = true
-                              hasErrorStop = false
+                      val sw = spokenWords[utteranceCursor]
+                      val expectedWord = allPageWords[revealedWordCount]
+
+                      if (wordsMatch(expectedWord, sw)) {
+                          revealedWordCount++
+                          utteranceCursor++
+                          matchedAny = true
+                          hasErrorStop = false
+                          lastKnockedWord = ""
+                      } else {
+                          // إذا كانت الكلمة لا تزال قيد النطق في نهاية الجملة الجزئية ننتظر اكتمالها
+                          val isStillFormingLastWord = !isFinalResult && (utteranceCursor == spokenWords.lastIndex)
+                          if (isStillFormingLastWord) {
+                              break
                           } else {
-                              hasErrorStop = true
-                              isListening = false
-                              speechRecognizer?.stopListening()
-                              statusMessage = "توقف! سمعت ($sw) في غير موضعها. أعد الكلمة أو اضغط (أكمل)"
-                              return
+                              // خطأ مؤكد: دقة على الطاولة مع استمرار الميكروفون بالاستماع!
+                              if (sw != lastKnockedWord) {
+                                  lastKnockedWord = sw
+                                  hasErrorStop = true
+                                  playTableKnockSound()
+                                  statusMessage = "تنبيه (دقة)! سمعت « $sw » — أعد الكلمة الصحيحة أو اضغط (أكمل)"
+                              }
+                              utteranceCursor++
                           }
                       }
                   }
+
                   if (matchedAny) {
                       if (revealedWordCount >= allPageWords.size) {
+                          userWantsListening = false
+                          speechRecognizer?.stopListening()
                           statusMessage = "ما شاء الله! أتممت تلاوة هذه الصفحة بالكامل بنجاح."
-                          isListening = false
-                      } else {
-                          statusMessage = "تلاوة صحيحة.. تابع القراءة"
+                      } else if (!hasErrorStop) {
+                          statusMessage = "تلاوة صحيحة ومستمرة.. تابع القراءة"
                       }
                   }
               }
 
-              fun startListeningSession() {
-                  if (speechRecognizer == null) {
-                      statusMessage = "جهازك لا يدعم التعرف الصوتي المباشر، يمكنك المتابعة بزر (أكمل)"
-                      return
-                  }
-                  val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                      putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                      putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ar-SA")
-                      putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                  }
-                  speechRecognizer.setRecognitionListener(object : RecognitionListener {
+              LaunchedEffect(speechRecognizer) {
+                  speechRecognizer?.setRecognitionListener(object : RecognitionListener {
                       override fun onReadyForSpeech(params: Bundle?) {
-                          statusMessage = "جاري الاستماع لتلاوتك... اقرأ الآن"
+                          if (!hasErrorStop) {
+                              statusMessage = "الميكروفون يستمع بشكل متواصل.. اقرأ الآن"
+                          }
                       }
                       override fun onBeginningOfSpeech() {}
                       override fun onRmsChanged(rmsdB: Float) {}
                       override fun onBufferReceived(buffer: ByteArray?) {}
-                      override fun onEndOfSpeech() {
-                          isListening = false
-                      }
+                      override fun onEndOfSpeech() {}
                       override fun onError(error: Int) {
-                          isListening = false
-                          if (!hasErrorStop) {
-                              statusMessage = "توقف الميكروفون مؤقتاً. اضغط (استماع) للمتابعة أو (أكمل) للمساعدة"
+                          if (userWantsListening) {
+                              scheduleRestartListening(150L)
                           }
                       }
                       override fun onResults(results: Bundle?) {
                           val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                           if (!matches.isNullOrEmpty()) {
-                              processSpokenText(matches[0])
+                              evaluateSpokenWords(matches[0], isFinalResult = true)
+                          }
+                          if (userWantsListening && revealedWordCount < allPageWords.size) {
+                              scheduleRestartListening(80L)
                           }
                       }
-                      override fun onPartialResults(partialResults: Bundle?) {}
+                      override fun onPartialResults(partialResults: Bundle?) {
+                          val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                          if (!matches.isNullOrEmpty()) {
+                              evaluateSpokenWords(matches[0], isFinalResult = false)
+                          }
+                      }
                       override fun onEvent(eventType: Int, params: Bundle?) {}
                   })
+              }
+
+              LaunchedEffect(currentPageIndex) {
+                  revealedWordCount = 0
                   hasErrorStop = false
-                  isListening = true
-                  speechRecognizer.startListening(intent)
+                  utteranceCursor = 0
+                  lastKnockedWord = ""
+                  if (currentPage != null) {
+                      pageInputText = currentPage.page.toString()
+                      juzInputText = currentPage.juz.toString()
+                      statusMessage = "أنت في ${currentPage.surah} - صفحة ${currentPage.page} (الجزء ${currentPage.juz})"
+                  }
+              }
+
+              DisposableEffect(Unit) {
+                  onDispose {
+                      mainHandler.removeCallbacksAndMessages(null)
+                      speechRecognizer?.destroy()
+                  }
               }
 
               val permissionLauncher = rememberLauncherForActivityResult(
                   ActivityResultContracts.RequestPermission()
               ) { isGranted ->
                   if (isGranted) {
-                      startListeningSession()
+                      userWantsListening = true
+                      startRecognizerCycle()
                   } else {
                       statusMessage = "يرجى السماح بصلاحية الميكروفون لتفعيل التسميع الصوتي"
                   }
@@ -422,29 +537,31 @@ jobs:
               Column(
                   modifier = Modifier
                       .fillMaxSize()
-                      .padding(10.dp),
+                      .padding(8.dp),
                   verticalArrangement = Arrangement.SpaceBetween
               ) {
-                  // لوحة التحكم العلوية المرتبة والواضحة
+                  // الشريط العلوي الأزرق بحجم مدمج وأزرار صغيرة على مسار واحد
                   Card(
                       modifier = Modifier.fillMaxWidth(),
                       colors = CardDefaults.cardColors(containerColor = Color(0xFF1B4F72)),
-                      shape = RoundedCornerShape(12.dp)
+                      shape = RoundedCornerShape(10.dp)
                   ) {
                       Column(
-                          modifier = Modifier.padding(12.dp),
-                          verticalArrangement = Arrangement.spacedBy(8.dp)
+                          modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                          verticalArrangement = Arrangement.spacedBy(6.dp)
                       ) {
-                          // السطر الأول: عنوان التطبيق + زر تبديل الوضع
+                          // السطر الأول: اسم التطبيق + الموقع الحالي + زر تبديل الوضع
                           Row(
                               modifier = Modifier.fillMaxWidth(),
                               horizontalArrangement = Arrangement.SpaceBetween,
                               verticalAlignment = Alignment.CenterVertically
                           ) {
                               Text(
-                                  text = "مصحفي الذكي",
+                                  text = if (currentPage != null)
+                                      "مصحفي | ${currentPage.surah} (ص ${currentPage.page} - ج ${currentPage.juz})"
+                                  else "مصحفي الذكي",
                                   color = Color.White,
-                                  fontSize = 19.sp,
+                                  fontSize = 14.sp,
                                   fontWeight = FontWeight.Bold
                               )
                               Button(
@@ -452,104 +569,89 @@ jobs:
                                   colors = ButtonDefaults.buttonColors(
                                       containerColor = if (isRecitationMode) Color(0xFF117864) else Color(0xFF2874A6)
                                   ),
-                                  contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                                  modifier = Modifier.height(34.dp)
+                                  contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                  modifier = Modifier.height(28.dp)
                               ) {
                                   Text(
-                                      text = if (isRecitationMode) "الوضع: تسميع واختبار" else "الوضع: قراءة كاملة",
+                                      text = if (isRecitationMode) "وضع التسميع" else "قراءة كاملة",
+                                      color = Color.White,
+                                      fontSize = 11.sp,
+                                      fontWeight = FontWeight.Bold
+                                  )
+                              }
+                          }
+
+                          // السطر الثاني: الصفحة والجزء بجانب بعضهما على مسار واحد بأزرار صغيرة
+                          Row(
+                              modifier = Modifier.fillMaxWidth(),
+                              horizontalArrangement = Arrangement.SpaceBetween,
+                              verticalAlignment = Alignment.CenterVertically
+                          ) {
+                              // قسم الصفحة
+                              Row(
+                                  verticalAlignment = Alignment.CenterVertically,
+                                  horizontalArrangement = Arrangement.spacedBy(4.dp)
+                              ) {
+                                  Text(
+                                      text = "صفحة:",
                                       color = Color.White,
                                       fontSize = 12.sp,
                                       fontWeight = FontWeight.Bold
                                   )
+                                  CompactNumberBox(
+                                      value = pageInputText,
+                                      onValueChange = { pageInputText = it }
+                                  )
+                                  Button(
+                                      onClick = {
+                                          focusManager.clearFocus()
+                                          val targetPage = pageInputText.toIntOrNull()
+                                          if (targetPage != null && targetPage in 1..pages.size) {
+                                              currentPageIndex = targetPage - 1
+                                          } else {
+                                              statusMessage = "أدخل رقم صفحة بين 1 و 604"
+                                          }
+                                      },
+                                      colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2874A6)),
+                                      contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                                      modifier = Modifier.height(32.dp)
+                                  ) {
+                                      Text("اذهب", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                  }
                               }
-                          }
 
-                          // شريط واضح يبين موقعك الحالي بالضبط
-                          if (currentPage != null) {
-                              Box(
-                                  modifier = Modifier
-                                      .fillMaxWidth()
-                                      .background(Color(0xFF154360), RoundedCornerShape(6.dp))
-                                      .padding(vertical = 4.dp, horizontal = 8.dp),
-                                  contentAlignment = Alignment.Center
+                              // قسم الجزء
+                              Row(
+                                  verticalAlignment = Alignment.CenterVertically,
+                                  horizontalArrangement = Arrangement.spacedBy(4.dp)
                               ) {
                                   Text(
-                                      text = "الموقع الحالي: ${currentPage.surah} | صفحة ${currentPage.page} من 604 | الجزء ${currentPage.juz}",
-                                      color = Color(0xFFA9DFBF),
-                                      fontSize = 13.sp,
+                                      text = "جزء:",
+                                      color = Color.White,
+                                      fontSize = 12.sp,
                                       fontWeight = FontWeight.Bold
                                   )
-                              }
-                          }
-
-                          // السطر الثاني: الانتقال السريع للصفحة
-                          Row(
-                              modifier = Modifier.fillMaxWidth(),
-                              horizontalArrangement = Arrangement.spacedBy(8.dp),
-                              verticalAlignment = Alignment.CenterVertically
-                          ) {
-                              Text(
-                                  text = "رقم الصفحة (1-604):",
-                                  color = Color.White,
-                                  fontSize = 13.sp,
-                                  fontWeight = FontWeight.Bold,
-                                  modifier = Modifier.width(125.dp)
-                              )
-                              NumberInputBox(
-                                  value = pageInputText,
-                                  onValueChange = { pageInputText = it },
-                                  modifier = Modifier.weight(1f)
-                              )
-                              Button(
-                                  onClick = {
-                                      focusManager.clearFocus()
-                                      val targetPage = pageInputText.toIntOrNull()
-                                      if (targetPage != null && targetPage in 1..pages.size) {
-                                          currentPageIndex = targetPage - 1
-                                      } else {
-                                          statusMessage = "أدخل رقم صفحة صحيح بين 1 و 604"
-                                      }
-                                  },
-                                  colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2874A6)),
-                                  modifier = Modifier.height(40.dp)
-                              ) {
-                                  Text("اذهب للصفحة", fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                              }
-                          }
-
-                          // السطر الثالث: الانتقال السريع للجزء
-                          Row(
-                              modifier = Modifier.fillMaxWidth(),
-                              horizontalArrangement = Arrangement.spacedBy(8.dp),
-                              verticalAlignment = Alignment.CenterVertically
-                          ) {
-                              Text(
-                                  text = "رقم الجزء (1-30):",
-                                  color = Color.White,
-                                  fontSize = 13.sp,
-                                  fontWeight = FontWeight.Bold,
-                                  modifier = Modifier.width(125.dp)
-                              )
-                              NumberInputBox(
-                                  value = juzInputText,
-                                  onValueChange = { juzInputText = it },
-                                  modifier = Modifier.weight(1f)
-                              )
-                              Button(
-                                  onClick = {
-                                      focusManager.clearFocus()
-                                      val targetJuz = juzInputText.toIntOrNull()
-                                      if (targetJuz != null && targetJuz in 1..30) {
-                                          val foundIndex = pages.indexOfFirst { it.juz == targetJuz }
-                                          if (foundIndex >= 0) currentPageIndex = foundIndex
-                                      } else {
-                                          statusMessage = "أدخل رقم جزء صحيح بين 1 و 30"
-                                      }
-                                  },
-                                  colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2874A6)),
-                                  modifier = Modifier.height(40.dp)
-                              ) {
-                                  Text("اذهب للجزء", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                  CompactNumberBox(
+                                      value = juzInputText,
+                                      onValueChange = { juzInputText = it }
+                                  )
+                                  Button(
+                                      onClick = {
+                                          focusManager.clearFocus()
+                                          val targetJuz = juzInputText.toIntOrNull()
+                                          if (targetJuz != null && targetJuz in 1..30) {
+                                              val foundIndex = pages.indexOfFirst { it.juz == targetJuz }
+                                              if (foundIndex >= 0) currentPageIndex = foundIndex
+                                          } else {
+                                              statusMessage = "أدخل رقم جزء بين 1 و 30"
+                                          }
+                                      },
+                                      colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2874A6)),
+                                      contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                                      modifier = Modifier.height(32.dp)
+                                  ) {
+                                      Text("اذهب", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                  }
                               }
                           }
                       }
@@ -559,7 +661,7 @@ jobs:
                   Card(
                       modifier = Modifier
                           .fillMaxWidth()
-                          .padding(vertical = 6.dp),
+                          .padding(vertical = 4.dp),
                       colors = CardDefaults.cardColors(
                           containerColor = if (hasErrorStop) Color(0xFFFADBD8) else Color(0xFFE8F8F5)
                       )
@@ -568,9 +670,9 @@ jobs:
                           text = statusMessage,
                           modifier = Modifier
                               .fillMaxWidth()
-                              .padding(8.dp),
+                              .padding(6.dp),
                           color = if (hasErrorStop) Color(0xFFC0392B) else Color(0xFF117864),
-                          fontSize = 13.sp,
+                          fontSize = 12.sp,
                           fontWeight = FontWeight.Bold,
                           textAlign = TextAlign.Center
                       )
@@ -589,7 +691,7 @@ jobs:
                       Column(
                           modifier = Modifier
                               .fillMaxSize()
-                              .padding(16.dp)
+                              .padding(14.dp)
                               .verticalScroll(scrollState),
                           horizontalAlignment = Alignment.CenterHorizontally
                       ) {
@@ -648,45 +750,52 @@ jobs:
                       }
                   }
 
-                  // الأزرار السفلية
+                  // الأزرار السفلية بحجم مدمج ومرتب
                   Column(
                       modifier = Modifier
                           .fillMaxWidth()
-                          .padding(top = 8.dp),
-                      verticalArrangement = Arrangement.spacedBy(8.dp)
+                          .padding(top = 6.dp),
+                      verticalArrangement = Arrangement.spacedBy(6.dp)
                   ) {
                       Row(
                           modifier = Modifier.fillMaxWidth(),
-                          horizontalArrangement = Arrangement.spacedBy(8.dp)
+                          horizontalArrangement = Arrangement.spacedBy(6.dp)
                       ) {
                           Button(
                               onClick = {
                                   isRecitationMode = true
-                                  if (isListening) {
+                                  if (userWantsListening) {
+                                      userWantsListening = false
+                                      mainHandler.removeCallbacksAndMessages(null)
                                       speechRecognizer?.stopListening()
-                                      isListening = false
-                                      statusMessage = "تم إيقاف الاستماع مؤقتاً"
+                                      statusMessage = "تم إيقاف التسميع الصوتي بناءً على طلبك"
                                   } else {
                                       val perm = ContextCompat.checkSelfPermission(
                                           context,
                                           Manifest.permission.RECORD_AUDIO
                                       )
                                       if (perm == PackageManager.PERMISSION_GRANTED) {
-                                          startListeningSession()
+                                          hasErrorStop = false
+                                          userWantsListening = true
+                                          startRecognizerCycle()
                                       } else {
                                           permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                                       }
                                   }
                               },
-                              modifier = Modifier.weight(1f),
+                              modifier = Modifier
+                                  .weight(1f)
+                                  .height(38.dp),
+                              contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                               colors = ButtonDefaults.buttonColors(
-                                  containerColor = if (isListening) Color(0xFFC0392B) else Color(0xFF1E8449)
+                                  containerColor = if (userWantsListening) Color(0xFFC0392B) else Color(0xFF1E8449)
                               )
                           ) {
                               Text(
-                                  text = if (isListening) "إيقاف الميكروفون" else "ابدأ التسميع بالصوت",
-                                  fontSize = 13.sp,
-                                  fontWeight = FontWeight.Bold
+                                  text = if (userWantsListening) "إيقاف التسميع" else "ابدأ التسميع المتواصل",
+                                  fontSize = 12.sp,
+                                  fontWeight = FontWeight.Bold,
+                                  maxLines = 1
                               )
                           }
 
@@ -702,34 +811,42 @@ jobs:
                                       val helpedWord = allPageWords[revealedWordCount]
                                       revealedWordCount++
                                       hasErrorStop = false
+                                      lastKnockedWord = ""
                                       statusMessage = "مساعدة (أكمل): الكلمة هي « $helpedWord »"
                                   } else {
                                       statusMessage = "جميع كلمات هذه الصفحة ظاهرة بالفعل!"
                                   }
                               },
-                              modifier = Modifier.weight(1f),
+                              modifier = Modifier
+                                  .weight(1f)
+                                  .height(38.dp),
+                              contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                               colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD35400))
                           ) {
                               Text(
-                                  text = "أكمل (كشف الكلمة)",
-                                  fontSize = 13.sp,
-                                  fontWeight = FontWeight.Bold
+                                  text = "أكمل (كشف كلمة)",
+                                  fontSize = 12.sp,
+                                  fontWeight = FontWeight.Bold,
+                                  maxLines = 1
                               )
                           }
                       }
 
                       Row(
                           modifier = Modifier.fillMaxWidth(),
-                          horizontalArrangement = Arrangement.spacedBy(8.dp)
+                          horizontalArrangement = Arrangement.spacedBy(6.dp)
                       ) {
                           Button(
                               onClick = {
                                   if (currentPageIndex > 0) currentPageIndex--
                               },
-                              modifier = Modifier.weight(1f),
+                              modifier = Modifier
+                                  .weight(1f)
+                                  .height(36.dp),
+                              contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
                               colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1B4F72))
                           ) {
-                              Text("الصفحة السابقة", fontSize = 12.sp)
+                              Text("الصفحة السابقة", fontSize = 12.sp, maxLines = 1)
                           }
 
                           Button(
@@ -742,26 +859,33 @@ jobs:
                                           if (count > revealedWordCount) {
                                               revealedWordCount = count
                                               hasErrorStop = false
+                                              lastKnockedWord = ""
                                               statusMessage = "تم كشف الآية رقم ${ayah.numberInSurah} كاملة"
                                               break
                                           }
                                       }
                                   }
                               },
-                              modifier = Modifier.weight(1f),
+                              modifier = Modifier
+                                  .weight(1f)
+                                  .height(36.dp),
+                              contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
                               colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF8E44AD))
                           ) {
-                              Text("أكمل الآية", fontSize = 12.sp)
+                              Text("أكمل الآية", fontSize = 12.sp, maxLines = 1)
                           }
 
                           Button(
                               onClick = {
                                   if (currentPageIndex < pages.size - 1) currentPageIndex++
                               },
-                              modifier = Modifier.weight(1f),
+                              modifier = Modifier
+                                  .weight(1f)
+                                  .height(36.dp),
+                              contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
                               colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1B4F72))
                           ) {
-                              Text("الصفحة التالية", fontSize = 12.sp)
+                              Text("الصفحة التالية", fontSize = 12.sp, maxLines = 1)
                           }
                       }
                   }
@@ -815,8 +939,8 @@ jobs:
                   applicationId = "com.example.mushafi"
                   minSdk = 24
                   targetSdk = 34
-                  versionCode = 3
-                  versionName = "3.0"
+                  versionCode = 4
+                  versionName = "4.0"
               }
 
               buildTypes {

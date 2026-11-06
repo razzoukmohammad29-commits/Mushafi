@@ -17,13 +17,13 @@ jobs:
           unzip -q Mushafi.zip -d extracted_project
 
           mkdir -p clean_project/app/src/main/java/com/example/mushafi
+          mkdir -p clean_project/app/src/main/assets
           mkdir -p clean_project/app/src/main/res/mipmap-hdpi
           mkdir -p clean_project/app/src/main/res/mipmap-mdpi
           mkdir -p clean_project/app/src/main/res/mipmap-xhdpi
           mkdir -p clean_project/app/src/main/res/mipmap-xxhdpi
           mkdir -p clean_project/app/src/main/res/mipmap-xxxhdpi
 
-          # تثبيت وتحجيم الأيقونة المرفوعة Frame.png لتناسب جميع مقاسات أندرويد
           if [ -f "Frame.png" ]; then
             sudo apt-get update -y && sudo apt-get install -y imagemagick
             convert Frame.png -resize 72x72 clean_project/app/src/main/res/mipmap-hdpi/ic_launcher.png
@@ -31,37 +31,629 @@ jobs:
             convert Frame.png -resize 96x96 clean_project/app/src/main/res/mipmap-xhdpi/ic_launcher.png
             convert Frame.png -resize 144x144 clean_project/app/src/main/res/mipmap-xxhdpi/ic_launcher.png
             convert Frame.png -resize 192x192 clean_project/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
-            # نسخها بصيغة round للأيقونات الدائرية أيضاً
             cp clean_project/app/src/main/res/mipmap-xxhdpi/ic_launcher.png clean_project/app/src/main/res/mipmap-xxhdpi/ic_launcher_round.png
           fi
 
-          # إنشاء كود Kotlin مستقر للشاشة الرئيسية
+          # تحميل وبناء قاعدة بيانات المصحف الكامل (604 صفحات - 30 جزءاً)
+          cat << 'EOF' > fetch_quran.py
+          import urllib.request
+          import json
+
+          url = "https://api.alquran.cloud/v1/quran/quran-simple"
+          req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+          with urllib.request.urlopen(req, timeout=60) as response:
+              data = json.loads(response.read().decode('utf-8'))
+
+          pages = {}
+          for surah in data['data']['surahs']:
+              surah_name = surah['name']
+              for ayah in surah['ayahs']:
+                  p = ayah['page']
+                  j = ayah['juz']
+                  text = ayah['text'].strip()
+                  num = ayah['numberInSurah']
+                  if p not in pages:
+                      pages[p] = {
+                          "page": p,
+                          "juz": j,
+                          "surah": surah_name,
+                          "ayahs": []
+                      }
+                  pages[p]["ayahs"].append({
+                      "s": surah_name,
+                      "n": num,
+                      "t": text
+                  })
+
+          result = [pages[k] for k in sorted(pages.keys())]
+          with open("clean_project/app/src/main/assets/quran_pages.json", "w", encoding="utf-8") as f:
+              json.dump(result, f, ensure_ascii=False)
+          print(f"Successfully generated {len(result)} pages of the Quran.")
+          EOF
+
+          python3 fetch_quran.py
+
+          # إنشاء الكود البرمجي الكامل للتطبيق مع التسميع الذكي وزر أكمل
           cat << 'EOF' > clean_project/app/src/main/java/com/example/mushafi/MainActivity.kt
           package com.example.mushafi
 
+          import android.Manifest
+          import android.content.Intent
+          import android.content.pm.PackageManager
           import android.os.Bundle
+          import android.speech.RecognitionListener
+          import android.speech.RecognizerIntent
+          import android.speech.SpeechRecognizer
           import androidx.activity.ComponentActivity
+          import androidx.activity.compose.rememberLauncherForActivityResult
           import androidx.activity.compose.setContent
-          import androidx.compose.foundation.layout.Box
-          import androidx.compose.foundation.layout.fillMaxSize
-          import androidx.compose.material3.MaterialTheme
-          import androidx.compose.material3.Surface
-          import androidx.compose.material3.Text
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.rememberScrollState
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.foundation.text.KeyboardOptions
+          import androidx.compose.foundation.verticalScroll
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
           import androidx.compose.ui.Alignment
           import androidx.compose.ui.Modifier
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.platform.LocalLayoutDirection
+          import androidx.compose.ui.text.SpanStyle
+          import androidx.compose.ui.text.buildAnnotatedString
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.input.KeyboardType
+          import androidx.compose.ui.text.style.TextAlign
+          import androidx.compose.ui.text.withStyle
+          import androidx.compose.ui.unit.LayoutDirection
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import androidx.core.content.ContextCompat
+          import org.json.JSONArray
+          import java.util.Locale
+
+          data class AyahItem(
+              val surahName: String,
+              val numberInSurah: Int,
+              val text: String,
+              val words: List<String>
+          )
+
+          data class QuranPageData(
+              val page: Int,
+              val juz: Int,
+              val surah: String,
+              val ayahs: List<AyahItem>
+          )
+
+          fun normalizeArabicWord(input: String): String {
+              var s = input.trim()
+              // إزالة التشكيل والرموز القرآنية للمطابقة الذكية
+              s = s.replace(Regex("[\\u0610-\\u061A\\u064B-\\u065F\\u0670\\u06D6-\\u06ED\\u0640]"), "")
+              s = s.replace(Regex("[أإآٱ]"), "ا")
+              s = s.replace("ة", "ه")
+              s = s.replace("ى", "ي")
+              s = s.replace("ؤ", "و")
+              s = s.replace("ئ", "ي")
+              s = s.replace("الرحمان", "الرحمن")
+              return s.replace(Regex("[^\\u0621-\\u064A]"), "")
+          }
+
+          fun wordsMatch(expected: String, spoken: String): Boolean {
+              val e = normalizeArabicWord(expected)
+              val s = normalizeArabicWord(spoken)
+              if (e.isEmpty() || s.isEmpty()) return false
+              if (e == s) return true
+              if (e.removePrefix("ال") == s.removePrefix("ال")) return true
+              if (e.removePrefix("و") == s || s.removePrefix("و") == e) return true
+              return false
+          }
 
           class MainActivity : ComponentActivity() {
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
+                  val pages = loadQuranPages()
                   setContent {
-                      MaterialTheme {
-                          Surface(
-                              modifier = Modifier.fillMaxSize(),
-                              color = MaterialTheme.colorScheme.background
-                          ) {
-                              Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                  Text(text = "مرحباً بك في تطبيق مصحفي")
+                      CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
+                          MaterialTheme {
+                              Surface(
+                                  modifier = Modifier.fillMaxSize(),
+                                  color = Color(0xFFFDFBF7)
+                              ) {
+                                  QuranSmartScreen(pages)
                               }
+                          }
+                      }
+                  }
+              }
+
+              private fun loadQuranPages(): List<QuranPageData> {
+                  val list = mutableListOf<QuranPageData>()
+                  try {
+                      val jsonStr = assets.open("quran_pages.json").bufferedReader().use { it.readText() }
+                      val jsonArray = JSONArray(jsonStr)
+                      for (i in 0 until jsonArray.length()) {
+                          val obj = jsonArray.getJSONObject(i)
+                          val ayahsArr = obj.getJSONArray("ayahs")
+                          val ayahList = mutableListOf<AyahItem>()
+                          for (j in 0 until ayahsArr.length()) {
+                              val aObj = ayahsArr.getJSONObject(j)
+                              val rawText = aObj.getString("t")
+                              val words = rawText.split(Regex("\\s+")).filter { it.isNotBlank() }
+                              ayahList.add(
+                                  AyahItem(
+                                      surahName = aObj.getString("s"),
+                                      numberInSurah = aObj.getInt("n"),
+                                      text = rawText,
+                                      words = words
+                                  )
+                              )
+                          }
+                          list.add(
+                              QuranPageData(
+                                  page = obj.getInt("page"),
+                                  juz = obj.getInt("juz"),
+                                  surah = obj.getString("surah"),
+                                  ayahs = ayahList
+                              )
+                          )
+                      }
+                  } catch (e: Exception) {
+                      e.printStackTrace()
+                  }
+                  return list
+              }
+          }
+
+          @Composable
+          fun QuranSmartScreen(pages: List<QuranPageData>) {
+              val context = LocalContext.current
+              var currentPageIndex by remember { mutableStateOf(0) }
+              var pageInputText by remember { mutableStateOf("1") }
+              var juzInputText by remember { mutableStateOf("1") }
+
+              // وضع التسميع والاختبار الذكي
+              var isRecitationMode by remember { mutableStateOf(true) }
+              var revealedWordCount by remember { mutableStateOf(0) }
+              var hasErrorStop by remember { mutableStateOf(false) }
+              var isListening by remember { mutableStateOf(false) }
+              var statusMessage by remember {
+                  mutableStateOf("حدد الصفحة أو الجزء، ثم ابدأ القراءة أو اضغط (أكمل) لكشف الكلمات")
+              }
+
+              val currentPage = if (pages.isNotEmpty()) pages[currentPageIndex] else null
+              val allPageWords = remember(currentPageIndex, pages) {
+                  currentPage?.ayahs?.flatMap { it.words } ?: emptyList()
+              }
+
+              // إعادة ضبط العداد عند تغيير الصفحة
+              LaunchedEffect(currentPageIndex) {
+                  revealedWordCount = 0
+                  hasErrorStop = false
+                  if (currentPage != null) {
+                      pageInputText = currentPage.page.toString()
+                      juzInputText = currentPage.juz.toString()
+                      statusMessage = "صفحة ${currentPage.page} (${currentPage.surah} - الجزء ${currentPage.juz})"
+                  }
+              }
+
+              // إعداد محرك التعرف على الصوت في أندرويد
+              val speechRecognizer = remember {
+                  if (SpeechRecognizer.isRecognitionAvailable(context)) {
+                      SpeechRecognizer.createSpeechRecognizer(context)
+                  } else null
+              }
+
+              DisposableEffect(Unit) {
+                  onDispose {
+                      speechRecognizer?.destroy()
+                  }
+              }
+
+              fun processSpokenText(spokenSentence: String) {
+                  if (allPageWords.isEmpty() || revealedWordCount >= allPageWords.size) return
+                  val spokenWords = spokenSentence.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+                  if (spokenWords.isEmpty()) return
+
+                  var matchedAny = false
+                  for (sw in spokenWords) {
+                      if (revealedWordCount < allPageWords.size) {
+                          val expectedWord = allPageWords[revealedWordCount]
+                          if (wordsMatch(expectedWord, sw)) {
+                              revealedWordCount++
+                              matchedAny = true
+                              hasErrorStop = false
+                          } else {
+                              // رصد خطأ أو تخطي كلمة/آية -> توقف فوري!
+                              hasErrorStop = true
+                              isListening = false
+                              speechRecognizer?.stopListening()
+                              statusMessage = "توقف! نطقت ($sw) في غير موضعها أو تخطيت كلمة. صحح التلاوة أو اضغط (أكمل)"
+                              return
+                          }
+                      }
+                  }
+                  if (matchedAny) {
+                      if (revealedWordCount >= allPageWords.size) {
+                          statusMessage = "أحسنت! أتممت تلاوة هذه الصفحة بالكامل بنجاح."
+                          isListening = false
+                      } else {
+                          statusMessage = "تلاوة صحيحة.. تابع القراءة"
+                      }
+                  }
+              }
+
+              fun startListeningSession() {
+                  if (speechRecognizer == null) {
+                      statusMessage = "جهازك لا يدعم خدمة التعرف الصوتي المباشر، يمكنك المتابعة بزر (أكمل)"
+                      return
+                  }
+                  val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                      putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                      putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ar-SA")
+                      putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                  }
+                  speechRecognizer.setRecognitionListener(object : RecognitionListener {
+                      override fun onReadyForSpeech(params: Bundle?) {
+                          statusMessage = "جاري الاستماع لتلاوتك... اقرأ الآن"
+                      }
+                      override fun onBeginningOfSpeech() {}
+                      override fun onRmsChanged(rmsdB: Float) {}
+                      override fun onBufferReceived(buffer: ByteArray?) {}
+                      override fun onEndOfSpeech() {
+                          isListening = false
+                      }
+                      override fun onError(error: Int) {
+                          isListening = false
+                          if (!hasErrorStop) {
+                              statusMessage = "توقف الاستماع الميكروفوني. اضغط (استماع) للمتابعة أو (أكمل) للمساعدة"
+                          }
+                      }
+                      override fun onResults(results: Bundle?) {
+                          val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                          if (!matches.isNullOrEmpty()) {
+                              processSpokenText(matches[0])
+                          }
+                      }
+                      override fun onPartialResults(partialResults: Bundle?) {}
+                      override fun onEvent(eventType: Int, params: Bundle?) {}
+                  })
+                  hasErrorStop = false
+                  isListening = true
+                  speechRecognizer.startListening(intent)
+              }
+
+              val permissionLauncher = rememberLauncherForActivityResult(
+                  ActivityResultContracts.RequestPermission()
+              ) { isGranted ->
+                  if (isGranted) {
+                      startListeningSession()
+                  } else {
+                      statusMessage = "يرجى السماح بصلاحية الميكروفون لتفعيل التسميع الصوتي"
+                  }
+              }
+
+              Column(
+                  modifier = Modifier
+                      .fillMaxSize()
+                      .padding(12.dp),
+                  verticalArrangement = Arrangement.SpaceBetween
+              ) {
+                  // الشريط العلوي: تحديد الصفحة أو الجزء
+                  Card(
+                      modifier = Modifier.fillMaxWidth(),
+                      colors = CardDefaults.cardColors(containerColor = Color(0xFF1B4F72)),
+                      shape = RoundedCornerShape(12.dp)
+                  ) {
+                      Column(
+                          modifier = Modifier.padding(12.dp),
+                          verticalArrangement = Arrangement.spacedBy(8.dp)
+                      ) {
+                          Row(
+                              modifier = Modifier.fillMaxWidth(),
+                              horizontalArrangement = Arrangement.SpaceBetween,
+                              verticalAlignment = Alignment.CenterVertically
+                          ) {
+                              Text(
+                                  text = "مصحفي الذكي",
+                                  color = Color.White,
+                                  fontSize = 20.sp,
+                                  fontWeight = FontWeight.Bold
+                              )
+                              TextButton(
+                                  onClick = { isRecitationMode = !isRecitationMode }
+                              ) {
+                                  Text(
+                                      text = if (isRecitationMode) "الوضع: تسميع واختبار" else "الوضع: قراءة كاملة",
+                                      color = Color(0xFFA9DFBF),
+                                      fontWeight = FontWeight.Bold
+                                  )
+                              }
+                          }
+
+                          Row(
+                              modifier = Modifier.fillMaxWidth(),
+                              horizontalArrangement = Arrangement.spacedBy(6.dp),
+                              verticalAlignment = Alignment.CenterVertically
+                          ) {
+                              OutlinedTextField(
+                                  value = pageInputText,
+                                  onValueChange = { pageInputText = it },
+                                  label = { Text("الصفحة (1-604)", color = Color.White, fontSize = 11.sp) },
+                                  keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                  singleLine = true,
+                                  modifier = Modifier.weight(1f),
+                                  colors = OutlinedTextFieldDefaults.colors(
+                                      focusedTextColor = Color.White,
+                                      unfocusedTextColor = Color.White,
+                                      focusedBorderColor = Color(0xFFA9DFBF),
+                                      unfocusedBorderColor = Color.LightGray
+                                  )
+                              )
+                              Button(
+                                  onClick = {
+                                      val targetPage = pageInputText.toIntOrNull()
+                                      if (targetPage != null && targetPage in 1..pages.size) {
+                                          currentPageIndex = targetPage - 1
+                                      } else {
+                                          statusMessage = "يرجى إدخال رقم صفحة صحيح بين 1 و 604"
+                                      }
+                                  },
+                                  colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2874A6))
+                              ) {
+                                  Text("انتقال للصفحة", fontSize = 12.sp)
+                              }
+
+                              OutlinedTextField(
+                                  value = juzInputText,
+                                  onValueChange = { juzInputText = it },
+                                  label = { Text("الجزء (1-30)", color = Color.White, fontSize = 11.sp) },
+                                  keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                  singleLine = true,
+                                  modifier = Modifier.weight(1f),
+                                  colors = OutlinedTextFieldDefaults.colors(
+                                      focusedTextColor = Color.White,
+                                      unfocusedTextColor = Color.White,
+                                      focusedBorderColor = Color(0xFFA9DFBF),
+                                      unfocusedBorderColor = Color.LightGray
+                                  )
+                              )
+                              Button(
+                                  onClick = {
+                                      val targetJuz = juzInputText.toIntOrNull()
+                                      if (targetJuz != null && targetJuz in 1..30) {
+                                          val foundIndex = pages.indexOfFirst { it.juz == targetJuz }
+                                          if (foundIndex >= 0) currentPageIndex = foundIndex
+                                      } else {
+                                          statusMessage = "يرجى إدخال رقم جزء صحيح بين 1 و 30"
+                                      }
+                                  },
+                                  colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2874A6))
+                              ) {
+                                  Text("انتقال للجزء", fontSize = 12.sp)
+                              }
+                          }
+                      }
+                  }
+
+                  // شريط التنبيهات والحالة (أحمر عند الخطأ، أخضر عند المتابعة)
+                  Card(
+                      modifier = Modifier
+                          .fillMaxWidth()
+                          .padding(vertical = 6.dp),
+                      colors = CardDefaults.cardColors(
+                          containerColor = if (hasErrorStop) Color(0xFFFADBD8) else Color(0xFFE8F8F5)
+                      )
+                  ) {
+                      Text(
+                          text = statusMessage,
+                          modifier = Modifier
+                              .fillMaxWidth()
+                              .padding(10.dp),
+                          color = if (hasErrorStop) Color(0xFFC0392B) else Color(0xFF117864),
+                          fontSize = 14.sp,
+                          fontWeight = FontWeight.Bold,
+                          textAlign = TextAlign.Center
+                      )
+                  }
+
+                  // لوحة عرض الآيات الكريمة للصفحة الحالية
+                  Card(
+                      modifier = Modifier
+                          .weight(1f)
+                          .fillMaxWidth(),
+                      colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF8E7)),
+                      elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
+                      shape = RoundedCornerShape(12.dp)
+                  ) {
+                      val scrollState = rememberScrollState()
+                      Column(
+                          modifier = Modifier
+                              .fillMaxSize()
+                              .padding(16.dp)
+                              .verticalScroll(scrollState),
+                          horizontalAlignment = Alignment.CenterHorizontally
+                      ) {
+                          if (currentPage != null) {
+                              Text(
+                                  text = "${currentPage.surah} - صفحة ${currentPage.page} (الجزء ${currentPage.juz})",
+                                  fontSize = 16.sp,
+                                  fontWeight = FontWeight.Bold,
+                                  color = Color(0xFF1B4F72),
+                                  modifier = Modifier.padding(bottom = 12.dp)
+                              )
+
+                              val annotatedPageText = buildAnnotatedString {
+                                  var globalWordIndex = 0
+                                  for (ayah in currentPage.ayahs) {
+                                      for (word in ayah.words) {
+                                          if (!isRecitationMode || globalWordIndex < revealedWordCount) {
+                                              // كلمة مقروءة أو في وضع القراءة الكاملة
+                                              withStyle(
+                                                  SpanStyle(
+                                                      color = Color(0xFF1E8449),
+                                                      fontWeight = FontWeight.Bold
+                                                  )
+                                              ) {
+                                                  append("$word ")
+                                              }
+                                          } else if (globalWordIndex == revealedWordCount && hasErrorStop) {
+                                              // موضع التوقف بسبب خطأ أو تخطي
+                                              withStyle(
+                                                  SpanStyle(
+                                                      color = Color(0xFFC0392B),
+                                                      background = Color(0xFFF5B7B1),
+                                                      fontWeight = FontWeight.Bold
+                                                  )
+                                              ) {
+                                                  append("[؟] ")
+                                              }
+                                          } else {
+                                              // كلمات مخفية بانتظار التلاوة أو الضغط على زر أكمل
+                                              withStyle(
+                                                  SpanStyle(color = Color(0xFFBDC3C7))
+                                              ) {
+                                                  append("••• ")
+                                              }
+                                          }
+                                          globalWordIndex++
+                                      }
+                                      withStyle(
+                                          SpanStyle(
+                                              color = Color(0xFFB7950B),
+                                              fontWeight = FontWeight.Bold
+                                          )
+                                      ) {
+                                          append("﴿${ayah.numberInSurah}﴾ ")
+                                      }
+                                  }
+                              }
+
+                              Text(
+                                  text = annotatedPageText,
+                                  fontSize = 23.sp,
+                                  lineHeight = 42.sp,
+                                  textAlign = TextAlign.Center,
+                                  modifier = Modifier.fillMaxWidth()
+                              )
+                          }
+                      }
+                  }
+
+                  // أزرار التحكم السفلية: استماع، أكمل (كلمة / آية)، التنقل بين الصفحات
+                  Column(
+                      modifier = Modifier
+                          .fillMaxWidth()
+                          .padding(top = 8.dp),
+                      verticalArrangement = Arrangement.spacedBy(8.dp)
+                  ) {
+                      Row(
+                          modifier = Modifier.fillMaxWidth(),
+                          horizontalArrangement = Arrangement.spacedBy(8.dp)
+                      ) {
+                          // زر التسميع الصوتي
+                          Button(
+                              onClick = {
+                                  isRecitationMode = true
+                                  if (isListening) {
+                                      speechRecognizer?.stopListening()
+                                      isListening = false
+                                      statusMessage = "تم إيقاف الاستماع مؤقتاً"
+                                  } else {
+                                      val perm = ContextCompat.checkSelfPermission(
+                                          context,
+                                          Manifest.permission.RECORD_AUDIO
+                                      )
+                                      if (perm == PackageManager.PERMISSION_GRANTED) {
+                                          startListeningSession()
+                                      } else {
+                                          permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                      }
+                                  }
+                              },
+                              modifier = Modifier.weight(1f),
+                              colors = ButtonDefaults.buttonColors(
+                                  containerColor = if (isListening) Color(0xFFC0392B) else Color(0xFF1E8449)
+                              )
+                          ) {
+                              Text(
+                                  text = if (isListening) "إيقاف الميكروفون" else "ابدأ التسميع بالصوت",
+                                  fontSize = 14.sp,
+                                  fontWeight = FontWeight.Bold
+                              )
+                          }
+
+                          // زر أكمل (لكشف الكلمة التالية عند التوقف أو النسيان)
+                          Button(
+                              onClick = {
+                                  isRecitationMode = true
+                                  if (revealedWordCount < allPageWords.size) {
+                                      val helpedWord = allPageWords[revealedWordCount]
+                                      revealedWordCount++
+                                      hasErrorStop = false
+                                      statusMessage = "مساعدة (أكمل): الكلمة هي « $helpedWord »"
+                                  } else {
+                                      statusMessage = "جميع كلمات هذه الصفحة ظاهرة بالفعل!"
+                                  }
+                              },
+                              modifier = Modifier.weight(1f),
+                              colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD35400))
+                          ) {
+                              Text(
+                                  text = "أكمل (كشف الكلمة)",
+                                  fontSize = 14.sp,
+                                  fontWeight = FontWeight.Bold
+                              )
+                          }
+                      }
+
+                      Row(
+                          modifier = Modifier.fillMaxWidth(),
+                          horizontalArrangement = Arrangement.spacedBy(8.dp)
+                      ) {
+                          Button(
+                              onClick = {
+                                  if (currentPageIndex > 0) currentPageIndex--
+                              },
+                              modifier = Modifier.weight(1f),
+                              colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1B4F72))
+                          ) {
+                              Text("الصفحة السابقة")
+                          }
+
+                          Button(
+                              onClick = {
+                                  // زر أكمل آية كاملة
+                                  if (currentPage != null) {
+                                      isRecitationMode = true
+                                      var count = 0
+                                      for (ayah in currentPage.ayahs) {
+                                          count += ayah.words.size
+                                          if (count > revealedWordCount) {
+                                              revealedWordCount = count
+                                              hasErrorStop = false
+                                              statusMessage = "تم كشف الآية رقم ${ayah.numberInSurah} كاملة"
+                                              break
+                                          }
+                                      }
+                                  }
+                              },
+                              modifier = Modifier.weight(1f),
+                              colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF8E44AD))
+                          ) {
+                              Text("أكمل الآية")
+                          }
+
+                          Button(
+                              onClick = {
+                                  if (currentPageIndex < pages.size - 1) currentPageIndex++
+                              },
+                              modifier = Modifier.weight(1f),
+                              colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1B4F72))
+                          ) {
+                              Text("الصفحة التالية")
                           }
                       }
                   }
@@ -115,8 +707,8 @@ jobs:
                   applicationId = "com.example.mushafi"
                   minSdk = 24
                   targetSdk = 34
-                  versionCode = 1
-                  versionName = "1.0"
+                  versionCode = 2
+                  versionName = "2.0"
               }
 
               buildTypes {
@@ -155,6 +747,15 @@ jobs:
           cat << 'EOF' > clean_project/app/src/main/AndroidManifest.xml
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+              <uses-permission android:name="android.permission.INTERNET" />
+
+              <queries>
+                  <intent>
+                      <action android:name="android.speech.RecognitionService" />
+                  </intent>
+              </queries>
+
               <application
                   android:allowBackup="true"
                   android:icon="@mipmap/ic_launcher"

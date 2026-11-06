@@ -34,7 +34,6 @@ jobs:
             cp clean_project/app/src/main/res/mipmap-xxhdpi/ic_launcher.png clean_project/app/src/main/res/mipmap-xxhdpi/ic_launcher_round.png
           fi
 
-          # تحميل المصحف الكامل ودمج علامات الوقف مع الكلمات
           cat << 'EOF' > fetch_quran.py
           import urllib.request
           import json
@@ -168,7 +167,6 @@ jobs:
               val ayahs: List<AyahItem>
           )
 
-          // تطبيع النص القرآني والإملائي مع معالجة الألف الخنجرية والرسم العثماني
           fun normalizeArabicForms(input: String): List<String> {
               val base = input.trim()
                   .replace(Regex("[\\u0610-\\u061A\\u064B-\\u065F\\u06D6-\\u06ED\\u0640]"), "")
@@ -184,7 +182,6 @@ jobs:
                   .replace("نجوه", "نجاه")
                   .replace("ربوا", "ربا")
 
-              // نختبر الكلمة مع تحويل الألف الخنجرية (\u0670) إلى ألف، ومع حذفها (مثل ذلك / العالمين)
               val withAlif = base.replace("\u0670", "ا")
                   .replace(Regex("ا+"), "ا")
                   .replace(Regex("[^\\u0621-\\u064A]"), "")
@@ -199,7 +196,6 @@ jobs:
               return normalizeArabicForms(input).firstOrNull() ?: ""
           }
 
-          // استخراج الجذر الصامت للكلمة لتجاوز فروق الرسم القرآني والهمزات والمدود
           fun extractConsonantSkeleton(word: String): String {
               var s = normalizeArabicWord(word)
               for (prefix in listOf("وال", "فال", "بال", "كال", "لل", "ال", "و", "ف", "ب", "ل")) {
@@ -254,7 +250,6 @@ jobs:
                       if (e.removeSuffix("و") == s || s.removeSuffix("و") == e) return true
                       if (e.removeSuffix("ي") == s || s.removeSuffix("ي") == e) return true
 
-                      // مطابقة الحروف المقطعة في أوائل السور
                       if (e == "الم" && (s == "الف" || s == "لام" || s == "ميم" || s == "الم")) return true
                       if (e == "يس" && (s == "ياسين" || s == "يس")) return true
                       if (e == "طه" && (s == "طاها" || s == "طه")) return true
@@ -266,7 +261,6 @@ jobs:
                   }
               }
 
-              // مطابقة الهيكل الصامت للكلمة (يتجاوز اختلافات الألف الخنجرية والهمزات والمدود)
               val eSkel = extractConsonantSkeleton(expected)
               val sSkel = extractConsonantSkeleton(spoken)
               if (eSkel.length >= 2 && eSkel == sSkel) return true
@@ -275,10 +269,1042 @@ jobs:
               return false
           }
 
-          // كتم صوت طنّة المايك الخاصة بالنظام أثناء الاستماع المتواصل
           fun setSystemMicBeepMuted(context: Context, mute: Boolean) {
               val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
               val direction = if (mute) AudioManager.ADJUST_MUTE else AudioManager.ADJUST_UNMUTE
               try { audioManager.adjustStreamVolume(AudioManager.STREAM_NOTIFICATION, direction, 0) } catch (_: Exception) {}
               try { audioManager.adjustStreamVolume(AudioManager.STREAM_SYSTEM, direction, 0) } catch (_: Exception) {}
-              try { audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC, direction,
+              try { audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC, direction, 0) } catch (_: Exception) {}
+
+              if (mute) {
+                  try {
+                      val maxAlarm = audioManager.getStreamMaxVolume(AudioManager.STREAM_ALARM)
+                      val curAlarm = audioManager.getStreamVolume(AudioManager.STREAM_ALARM)
+                      if (curAlarm < (maxAlarm * 0.65).toInt()) {
+                          audioManager.setStreamVolume(AudioManager.STREAM_ALARM, (maxAlarm * 0.75).toInt(), 0)
+                      }
+                  } catch (_: Exception) {}
+              }
+          }
+
+          fun playTableKnockSound() {
+              Thread {
+                  try {
+                      val sampleRate = 22050
+                      val durationMs = 240
+                      val numSamples = (sampleRate * durationMs) / 1000
+                      val buffer = ShortArray(numSamples)
+
+                      for (i in 0 until numSamples) {
+                          val t = i.toDouble() / sampleRate
+                          var sample = 0.0
+                          if (t < 0.070) {
+                              val env = Math.exp(-t * 60.0)
+                              val wave = Math.sin(2.0 * Math.PI * 150.0 * t) * 0.80 +
+                                         Math.sin(2.0 * Math.PI * 300.0 * t) * 0.20
+                              sample = wave * env
+                          } else if (t >= 0.110 && t < 0.195) {
+                              val t2 = t - 0.110
+                              val env = Math.exp(-t2 * 50.0)
+                              val wave = Math.sin(2.0 * Math.PI * 140.0 * t2) * 0.85 +
+                                         Math.sin(2.0 * Math.PI * 280.0 * t2) * 0.15
+                              sample = wave * env
+                          }
+                          val pcmVal = (sample * Short.MAX_VALUE).toInt()
+                              .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                          buffer[i] = pcmVal.toShort()
+                      }
+
+                      val audioTrack = AudioTrack.Builder()
+                          .setAudioAttributes(
+                              AudioAttributes.Builder()
+                                  .setUsage(AudioAttributes.USAGE_ALARM)
+                                  .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                                  .build()
+                          )
+                          .setAudioFormat(
+                              AudioFormat.Builder()
+                                  .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                                  .setSampleRate(sampleRate)
+                                  .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                                  .build()
+                          )
+                          .setBufferSizeInBytes(buffer.size * 2)
+                          .setTransferMode(AudioTrack.MODE_STATIC)
+                          .build()
+
+                      audioTrack.write(buffer, 0, buffer.size)
+                      audioTrack.play()
+                      Thread.sleep(270)
+                      audioTrack.release()
+                  } catch (e: Exception) {
+                      e.printStackTrace()
+                  }
+              }.start()
+          }
+
+          class MainActivity : ComponentActivity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val pages = loadQuranPages()
+                  setContent {
+                      CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
+                          MaterialTheme {
+                              Surface(
+                                  modifier = Modifier.fillMaxSize(),
+                                  color = Color(0xFFFDFBF7)
+                              ) {
+                                  QuranSmartScreen(pages)
+                              }
+                          }
+                      }
+                  }
+              }
+
+              override fun onPause() {
+                  super.onPause()
+                  setSystemMicBeepMuted(this, false)
+              }
+
+              override fun onDestroy() {
+                  setSystemMicBeepMuted(this, false)
+                  super.onDestroy()
+              }
+
+              private fun loadQuranPages(): List<QuranPageData> {
+                  val list = mutableListOf<QuranPageData>()
+                  try {
+                      val jsonStr = assets.open("quran_pages.json").bufferedReader().use { it.readText() }
+                      val jsonArray = JSONArray(jsonStr)
+                      for (i in 0 until jsonArray.length()) {
+                          val obj = jsonArray.getJSONObject(i)
+                          val ayahsArr = obj.getJSONArray("ayahs")
+                          val ayahList = mutableListOf<AyahItem>()
+                          for (j in 0 until ayahsArr.length()) {
+                              val aObj = ayahsArr.getJSONObject(j)
+                              val rawText = aObj.getString("t")
+                              val globalNum = aObj.optInt("g", 1)
+                              val wordsArr = aObj.optJSONArray("w")
+                              val words = mutableListOf<String>()
+                              if (wordsArr != null) {
+                                  for (k in 0 until wordsArr.length()) {
+                                      val w = wordsArr.getString(k)
+                                      if (normalizeArabicWord(w).isNotEmpty()) {
+                                          words.add(w)
+                                      } else if (words.isNotEmpty()) {
+                                          words[words.lastIndex] = words.last() + " " + w
+                                      }
+                                  }
+                              } else {
+                                  for (token in rawText.split(Regex("\\s+")).filter { it.isNotBlank() }) {
+                                      if (normalizeArabicWord(token).isNotEmpty()) {
+                                          words.add(token)
+                                      } else if (words.isNotEmpty()) {
+                                          words[words.lastIndex] = words.last() + " " + token
+                                      }
+                                  }
+                              }
+                              ayahList.add(
+                                  AyahItem(
+                                      surahName = aObj.getString("s"),
+                                      numberInSurah = aObj.getInt("n"),
+                                      globalNumber = globalNum,
+                                      text = rawText,
+                                      words = words
+                                  )
+                              )
+                          }
+                          list.add(
+                              QuranPageData(
+                                  page = obj.getInt("page"),
+                                  juz = obj.getInt("juz"),
+                                  surah = obj.getString("surah"),
+                                  ayahs = ayahList
+                              )
+                          )
+                      }
+                  } catch (e: Exception) {
+                      e.printStackTrace()
+                  }
+                  return list
+              }
+          }
+
+          @Composable
+          fun CompactNumberBox(
+              value: String,
+              onValueChange: (String) -> Unit,
+              modifier: Modifier = Modifier
+          ) {
+              Box(
+                  modifier = modifier
+                      .width(50.dp)
+                      .height(30.dp)
+                      .background(Color.White, RoundedCornerShape(6.dp))
+                      .border(1.dp, Color(0xFFA9DFBF), RoundedCornerShape(6.dp))
+                      .padding(horizontal = 4.dp),
+                  contentAlignment = Alignment.Center
+              ) {
+                  BasicTextField(
+                      value = value,
+                      onValueChange = { newVal ->
+                          if (newVal.all { it.isDigit() } && newVal.length <= 3) {
+                              onValueChange(newVal)
+                          }
+                      },
+                      singleLine = true,
+                      keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                      textStyle = TextStyle(
+                          color = Color(0xFF1B4F72),
+                          fontSize = 14.sp,
+                          fontWeight = FontWeight.Bold,
+                          textAlign = TextAlign.Center
+                      ),
+                      modifier = Modifier.fillMaxWidth()
+                  )
+              }
+          }
+
+          @Composable
+          fun QuranSmartScreen(pages: List<QuranPageData>) {
+              val context = LocalContext.current
+              val focusManager = LocalFocusManager.current
+              val mainHandler = remember { Handler(Looper.getMainLooper()) }
+
+              var currentPageIndex by remember { mutableStateOf(0) }
+              var pageInputText by remember { mutableStateOf("1") }
+              var juzInputText by remember { mutableStateOf("1") }
+
+              var isRecitationMode by remember { mutableStateOf(true) }
+              var revealedWordCount by remember { mutableStateOf(0) }
+              var cycleStartWordCount by remember { mutableStateOf(0) }
+              var hasErrorStop by remember { mutableStateOf(false) }
+
+              var userWantsListening by remember { mutableStateOf(false) }
+              var isSheikhSpeaking by remember { mutableStateOf(false) }
+              var mistakeCountAtCurrentWord by remember { mutableStateOf(0) }
+              var knockedWordIndex by remember { mutableStateOf(-1) }
+
+              var statusMessage by remember {
+                  mutableStateOf("اضغط (ابدأ التسميع) ليسمعك الشيخ بصمت ويدق على الطاولة عند الخطأ")
+              }
+
+              val currentPage = if (pages.isNotEmpty()) pages[currentPageIndex] else null
+              val allPageWords = remember(currentPageIndex, pages) {
+                  currentPage?.ayahs?.flatMap { it.words } ?: emptyList()
+              }
+
+              var ttsEngine by remember { mutableStateOf<TextToSpeech?>(null) }
+              var ttsArabicReady by remember { mutableStateOf(false) }
+              var mediaPlayer by remember { mutableStateOf<MediaPlayer?>(null) }
+
+              val speechRecognizer = remember {
+                  if (SpeechRecognizer.isRecognitionAvailable(context)) {
+                      SpeechRecognizer.createSpeechRecognizer(context)
+                  } else null
+              }
+
+              fun startRecognizerCycle() {
+                  if (!userWantsListening || isSheikhSpeaking || speechRecognizer == null) return
+                  setSystemMicBeepMuted(context, true)
+                  cycleStartWordCount = revealedWordCount
+                  val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                      putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                      putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ar-SA")
+                      putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                      putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+                      putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2200L)
+                      putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1800L)
+                  }
+                  try {
+                      speechRecognizer.startListening(intent)
+                  } catch (e: Exception) {
+                      e.printStackTrace()
+                  }
+              }
+
+              fun scheduleRestartListening(delayMs: Long = 60L) {
+                  mainHandler.removeCallbacksAndMessages(null)
+                  if (userWantsListening && !isSheikhSpeaking && revealedWordCount < allPageWords.size) {
+                      mainHandler.postDelayed({
+                          if (userWantsListening && !isSheikhSpeaking && revealedWordCount < allPageWords.size) {
+                              startRecognizerCycle()
+                          }
+                      }, delayMs)
+                  }
+              }
+
+              fun triggerSheikhReciteAyah() {
+                  if (currentPage == null || revealedWordCount >= allPageWords.size) return
+                  mainHandler.removeCallbacksAndMessages(null)
+                  isSheikhSpeaking = true
+                  try { speechRecognizer?.cancel() } catch (_: Exception) {}
+
+                  var runningCount = 0
+                  var targetAyah: AyahItem? = null
+                  var startWordInAyah = 0
+                  for (ayah in currentPage.ayahs) {
+                      val nextCount = runningCount + ayah.words.size
+                      if (nextCount > revealedWordCount) {
+                          targetAyah = ayah
+                          startWordInAyah = revealedWordCount - runningCount
+                          revealedWordCount = nextCount
+                          cycleStartWordCount = nextCount
+                          break
+                      }
+                      runningCount = nextCount
+                  }
+
+                  hasErrorStop = false
+                  mistakeCountAtCurrentWord = 0
+                  knockedWordIndex = -1
+
+                  val ayahToRead = targetAyah ?: return
+                  val remainingWordsText = ayahToRead.words.drop(startWordInAyah).joinToString(" ")
+                  statusMessage = "الشيخ يلقنك الآية (${ayahToRead.numberInSurah}): « $remainingWordsText »"
+
+                  val onSheikhFinished = {
+                      mainHandler.post {
+                          isSheikhSpeaking = false
+                          if (userWantsListening && revealedWordCount < allPageWords.size) {
+                              statusMessage = "أكمل التلاوة بعد تلقين الشيخ.."
+                              scheduleRestartListening(100L)
+                          } else if (revealedWordCount >= allPageWords.size) {
+                              userWantsListening = false
+                              setSystemMicBeepMuted(context, false)
+                              statusMessage = "ما شاء الله! أتممت تلاوة الصفحة بنجاح."
+                          }
+                      }
+                  }
+
+                  if (ttsArabicReady && ttsEngine != null) {
+                      val params = Bundle()
+                      ttsEngine?.speak(remainingWordsText, TextToSpeech.QUEUE_FLUSH, params, "SHEIKH_AYAH")
+                  } else {
+                      try {
+                          mediaPlayer?.release()
+                          val mp = MediaPlayer()
+                          mediaPlayer = mp
+                          mp.setAudioAttributes(
+                              AudioAttributes.Builder()
+                                  .setUsage(AudioAttributes.USAGE_ALARM)
+                                  .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                  .build()
+                          )
+                          mp.setDataSource("https://cdn.islamic.network/quran/audio/64/ar.husary/${ayahToRead.globalNumber}.mp3")
+                          mp.setOnPreparedListener { it.start() }
+                          mp.setOnCompletionListener { onSheikhFinished() }
+                          mp.setOnErrorListener { _, _, _ ->
+                              onSheikhFinished()
+                              true
+                          }
+                          mp.prepareAsync()
+                      } catch (_: Exception) {
+                          onSheikhFinished()
+                      }
+                  }
+              }
+
+              fun evaluateSpokenCandidates(candidates: List<String>, isFinalResult: Boolean) {
+                  if (isSheikhSpeaking || allPageWords.isEmpty() || revealedWordCount >= allPageWords.size) return
+
+                  var bestReachedWordCount = revealedWordCount
+                  var bestUnmatchedTail = Int.MAX_VALUE
+                  var sampleWrongWord = ""
+
+                  for (sentence in candidates) {
+                      val spokenWords = sentence.trim()
+                          .split(Regex("\\s+"))
+                          .filter { normalizeArabicWord(it).isNotEmpty() }
+                      if (spokenWords.isEmpty()) continue
+
+                      var simCursor = cycleStartWordCount
+                      var sIdx = 0
+                      var unmatchedAfterProgress = 0
+                      var firstWrong = ""
+
+                      while (sIdx < spokenWords.size && simCursor < allPageWords.size) {
+                          val sw = spokenWords[sIdx]
+                          val expected = allPageWords[simCursor]
+
+                          if (wordsMatch(expected, sw)) {
+                              simCursor++
+                              sIdx++
+                              unmatchedAfterProgress = 0
+                              continue
+                          }
+
+                          if (sIdx + 1 < spokenWords.size &&
+                              wordsMatch(expected, sw + spokenWords[sIdx + 1])
+                          ) {
+                              simCursor++
+                              sIdx += 2
+                              unmatchedAfterProgress = 0
+                              continue
+                          }
+
+                          if (simCursor + 1 < allPageWords.size &&
+                              wordsMatch(expected + allPageWords[simCursor + 1], sw)
+                          ) {
+                              simCursor += 2
+                              sIdx++
+                              unmatchedAfterProgress = 0
+                              continue
+                          }
+
+                          if (simCursor > 0 && wordsMatch(allPageWords[simCursor - 1], sw)) {
+                              sIdx++
+                              continue
+                          }
+
+                          if (simCursor + 1 < allPageWords.size &&
+                              wordsMatch(allPageWords[simCursor + 1], sw) &&
+                              normalizeArabicWord(expected).length <= 3
+                          ) {
+                              simCursor += 2
+                              sIdx++
+                              unmatchedAfterProgress = 0
+                              continue
+                          }
+
+                          if (firstWrong.isEmpty()) firstWrong = sw
+                          unmatchedAfterProgress++
+                          sIdx++
+                      }
+
+                      if (simCursor > bestReachedWordCount ||
+                          (simCursor == bestReachedWordCount && unmatchedAfterProgress < bestUnmatchedTail)
+                      ) {
+                          bestReachedWordCount = simCursor
+                          bestUnmatchedTail = unmatchedAfterProgress
+                          sampleWrongWord = firstWrong
+                      }
+                  }
+
+                  if (bestReachedWordCount > revealedWordCount) {
+                      revealedWordCount = bestReachedWordCount
+                      hasErrorStop = false
+                      mistakeCountAtCurrentWord = 0
+                      knockedWordIndex = -1
+                      mainHandler.removeCallbacksAndMessages(null)
+
+                      if (revealedWordCount >= allPageWords.size) {
+                          userWantsListening = false
+                          speechRecognizer?.stopListening()
+                          setSystemMicBeepMuted(context, false)
+                          statusMessage = "ما شاء الله! أتممت تلاوة هذه الصفحة بالكامل بنجاح."
+                          return
+                      } else {
+                          statusMessage = "تلاوة صحيحة.. الشيخ يستمع إليك"
+                      }
+                  }
+
+                  val confirmedMistake = (isFinalResult && bestUnmatchedTail >= 1 && bestReachedWordCount == revealedWordCount) ||
+                                         (!isFinalResult && bestUnmatchedTail >= 3 && bestReachedWordCount == revealedWordCount)
+
+                  if (confirmedMistake && sampleWrongWord.isNotEmpty()) {
+                      if (knockedWordIndex != revealedWordCount) {
+                          knockedWordIndex = revealedWordCount
+                          mistakeCountAtCurrentWord = 1
+                          hasErrorStop = true
+                          playTableKnockSound()
+                          statusMessage = "دقة الشيخ على الطاولة! أعد الكلمة، وإذا لم تعرفها سيلقنك الشيخ الآية"
+
+                          mainHandler.removeCallbacksAndMessages(null)
+                          mainHandler.postDelayed({
+                              if (userWantsListening && hasErrorStop && revealedWordCount == knockedWordIndex) {
+                                  triggerSheikhReciteAyah()
+                              }
+                          }, 5000L)
+                      } else if (isFinalResult) {
+                          triggerSheikhReciteAyah()
+                      }
+                  }
+              }
+
+              LaunchedEffect(Unit) {
+                  ttsEngine = TextToSpeech(context) { status ->
+                      if (status == TextToSpeech.SUCCESS) {
+                          ttsEngine?.setAudioAttributes(
+                              AudioAttributes.Builder()
+                                  .setUsage(AudioAttributes.USAGE_ALARM)
+                                  .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                  .build()
+                          )
+                          val res = ttsEngine?.setLanguage(Locale("ar"))
+                          ttsArabicReady = (res != TextToSpeech.LANG_MISSING_DATA && res != TextToSpeech.LANG_NOT_SUPPORTED)
+                          ttsEngine?.setSpeechRate(0.88f)
+                          ttsEngine?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                              override fun onStart(utteranceId: String?) {}
+                              override fun onDone(utteranceId: String?) {
+                                  mainHandler.post {
+                                      isSheikhSpeaking = false
+                                      if (userWantsListening && revealedWordCount < allPageWords.size) {
+                                          statusMessage = "أكمل التلاوة بعد تلقين الشيخ.."
+                                          scheduleRestartListening(80L)
+                                      }
+                                  }
+                              }
+                              override fun onError(utteranceId: String?) {
+                                  mainHandler.post {
+                                      isSheikhSpeaking = false
+                                      if (userWantsListening && revealedWordCount < allPageWords.size) {
+                                          scheduleRestartListening(80L)
+                                      }
+                                  }
+                              }
+                          })
+                      }
+                  }
+              }
+
+              LaunchedEffect(speechRecognizer) {
+                  speechRecognizer?.setRecognitionListener(object : RecognitionListener {
+                      override fun onReadyForSpeech(params: Bundle?) {
+                          if (!hasErrorStop && !isSheikhSpeaking) {
+                              statusMessage = "الشيخ يستمع لتلاوتك بصمت.. اقرأ الآن"
+                          }
+                      }
+                      override fun onBeginningOfSpeech() {}
+                      override fun onRmsChanged(rmsdB: Float) {}
+                      override fun onBufferReceived(buffer: ByteArray?) {}
+                      override fun onEndOfSpeech() {}
+                      override fun onError(error: Int) {
+                          if (userWantsListening && !isSheikhSpeaking) {
+                              scheduleRestartListening(80L)
+                          }
+                      }
+                      override fun onResults(results: Bundle?) {
+                          val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                          if (!matches.isNullOrEmpty()) {
+                              evaluateSpokenCandidates(matches, isFinalResult = true)
+                          }
+                          if (userWantsListening && !isSheikhSpeaking && revealedWordCount < allPageWords.size) {
+                              scheduleRestartListening(50L)
+                          }
+                      }
+                      override fun onPartialResults(partialResults: Bundle?) {
+                          val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                          if (!matches.isNullOrEmpty()) {
+                              evaluateSpokenCandidates(matches, isFinalResult = false)
+                          }
+                      }
+                      override fun onEvent(eventType: Int, params: Bundle?) {}
+                  })
+              }
+
+              LaunchedEffect(currentPageIndex) {
+                  revealedWordCount = 0
+                  cycleStartWordCount = 0
+                  hasErrorStop = false
+                  mistakeCountAtCurrentWord = 0
+                  knockedWordIndex = -1
+                  if (currentPage != null) {
+                      pageInputText = currentPage.page.toString()
+                      juzInputText = currentPage.juz.toString()
+                      statusMessage = "أنت في ${currentPage.surah} - صفحة ${currentPage.page} (الجزء ${currentPage.juz})"
+                  }
+              }
+
+              DisposableEffect(Unit) {
+                  onDispose {
+                      mainHandler.removeCallbacksAndMessages(null)
+                      setSystemMicBeepMuted(context, false)
+                      speechRecognizer?.destroy()
+                      ttsEngine?.stop()
+                      ttsEngine?.shutdown()
+                      mediaPlayer?.release()
+                  }
+              }
+
+              val permissionLauncher = rememberLauncherForActivityResult(
+                  ActivityResultContracts.RequestPermission()
+              ) { isGranted ->
+                  if (isGranted) {
+                      userWantsListening = true
+                      startRecognizerCycle()
+                  } else {
+                      statusMessage = "يرجى السماح بصلاحية الميكروفون لتفعيل التسميع الصوتي"
+                  }
+              }
+
+              Column(
+                  modifier = Modifier
+                      .fillMaxSize()
+                      .padding(8.dp),
+                  verticalArrangement = Arrangement.SpaceBetween
+              ) {
+                  Card(
+                      modifier = Modifier.fillMaxWidth(),
+                      colors = CardDefaults.cardColors(containerColor = Color(0xFF1B4F72)),
+                      shape = RoundedCornerShape(10.dp)
+                  ) {
+                      Column(
+                          modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                          verticalArrangement = Arrangement.spacedBy(6.dp)
+                      ) {
+                          Row(
+                              modifier = Modifier.fillMaxWidth(),
+                              horizontalArrangement = Arrangement.SpaceBetween,
+                              verticalAlignment = Alignment.CenterVertically
+                          ) {
+                              Text(
+                                  text = if (currentPage != null)
+                                      "مصحفي | ${currentPage.surah} (ص ${currentPage.page} - ج ${currentPage.juz})"
+                                  else "مصحفي الذكي",
+                                  color = Color.White,
+                                  fontSize = 14.sp,
+                                  fontWeight = FontWeight.Bold
+                              )
+                              Button(
+                                  onClick = { isRecitationMode = !isRecitationMode },
+                                  colors = ButtonDefaults.buttonColors(
+                                      containerColor = if (isRecitationMode) Color(0xFF117864) else Color(0xFF2874A6)
+                                  ),
+                                  contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                  modifier = Modifier.height(28.dp)
+                              ) {
+                                  Text(
+                                      text = if (isRecitationMode) "وضع التسميع" else "قراءة كاملة",
+                                      color = Color.White,
+                                      fontSize = 11.sp,
+                                      fontWeight = FontWeight.Bold
+                                  )
+                              }
+                          }
+
+                          Row(
+                              modifier = Modifier.fillMaxWidth(),
+                              horizontalArrangement = Arrangement.SpaceBetween,
+                              verticalAlignment = Alignment.CenterVertically
+                          ) {
+                              Row(
+                                  verticalAlignment = Alignment.CenterVertically,
+                                  horizontalArrangement = Arrangement.spacedBy(4.dp)
+                              ) {
+                                  Text(
+                                      text = "صفحة:",
+                                      color = Color.White,
+                                      fontSize = 12.sp,
+                                      fontWeight = FontWeight.Bold
+                                  )
+                                  CompactNumberBox(
+                                      value = pageInputText,
+                                      onValueChange = { pageInputText = it }
+                                  )
+                                  Button(
+                                      onClick = {
+                                          focusManager.clearFocus()
+                                          val targetPage = pageInputText.toIntOrNull()
+                                          if (targetPage != null && targetPage in 1..pages.size) {
+                                              currentPageIndex = targetPage - 1
+                                          } else {
+                                              statusMessage = "أدخل رقم صفحة بين 1 و 604"
+                                          }
+                                      },
+                                      colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2874A6)),
+                                      contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                                      modifier = Modifier.height(30.dp)
+                                  ) {
+                                      Text("اذهب", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                  }
+                              }
+
+                              Row(
+                                  verticalAlignment = Alignment.CenterVertically,
+                                  horizontalArrangement = Arrangement.spacedBy(4.dp)
+                              ) {
+                                  Text(
+                                      text = "جزء:",
+                                      color = Color.White,
+                                      fontSize = 12.sp,
+                                      fontWeight = FontWeight.Bold
+                                  )
+                                  CompactNumberBox(
+                                      value = juzInputText,
+                                      onValueChange = { juzInputText = it }
+                                  )
+                                  Button(
+                                      onClick = {
+                                          focusManager.clearFocus()
+                                          val targetJuz = juzInputText.toIntOrNull()
+                                          if (targetJuz != null && targetJuz in 1..30) {
+                                              val foundIndex = pages.indexOfFirst { it.juz == targetJuz }
+                                              if (foundIndex >= 0) currentPageIndex = foundIndex
+                                          } else {
+                                              statusMessage = "أدخل رقم جزء بين 1 و 30"
+                                          }
+                                      },
+                                      colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2874A6)),
+                                      contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                                      modifier = Modifier.height(30.dp)
+                                  ) {
+                                      Text("اذهب", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                  }
+                              }
+                          }
+                      }
+                  }
+
+                  Card(
+                      modifier = Modifier
+                          .fillMaxWidth()
+                          .padding(vertical = 4.dp),
+                      colors = CardDefaults.cardColors(
+                          containerColor = if (hasErrorStop) Color(0xFFFADBD8) else Color(0xFFE8F8F5)
+                      )
+                  ) {
+                      Text(
+                          text = statusMessage,
+                          modifier = Modifier
+                              .fillMaxWidth()
+                              .padding(6.dp),
+                          color = if (hasErrorStop) Color(0xFFC0392B) else Color(0xFF117864),
+                          fontSize = 12.sp,
+                          fontWeight = FontWeight.Bold,
+                          textAlign = TextAlign.Center
+                      )
+                  }
+
+                  Card(
+                      modifier = Modifier
+                          .weight(1f)
+                          .fillMaxWidth(),
+                      colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF8E7)),
+                      elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
+                      shape = RoundedCornerShape(12.dp)
+                  ) {
+                      val scrollState = rememberScrollState()
+                      Column(
+                          modifier = Modifier
+                              .fillMaxSize()
+                              .padding(14.dp)
+                              .verticalScroll(scrollState),
+                          horizontalAlignment = Alignment.CenterHorizontally
+                      ) {
+                          if (currentPage != null) {
+                              val annotatedPageText = buildAnnotatedString {
+                                  var globalWordIndex = 0
+                                  for (ayah in currentPage.ayahs) {
+                                      for (word in ayah.words) {
+                                          if (!isRecitationMode || globalWordIndex < revealedWordCount) {
+                                              withStyle(
+                                                  SpanStyle(
+                                                      color = Color(0xFF1E8449),
+                                                      fontWeight = FontWeight.Bold
+                                                  )
+                                              ) {
+                                                  append("$word ")
+                                              }
+                                          } else if (globalWordIndex == revealedWordCount && hasErrorStop) {
+                                              withStyle(
+                                                  SpanStyle(
+                                                      color = Color(0xFFC0392B),
+                                                      background = Color(0xFFF5B7B1),
+                                                      fontWeight = FontWeight.Bold
+                                                  )
+                                              ) {
+                                                  append("[؟] ")
+                                              }
+                                          } else {
+                                              withStyle(
+                                                  SpanStyle(color = Color(0xFFBDC3C7))
+                                              ) {
+                                                  append("••• ")
+                                              }
+                                          }
+                                          globalWordIndex++
+                                      }
+                                      withStyle(
+                                          SpanStyle(
+                                              color = Color(0xFFB7950B),
+                                              fontWeight = FontWeight.Bold
+                                          )
+                                      ) {
+                                          append("﴿${ayah.numberInSurah}﴾ ")
+                                      }
+                                  }
+                              }
+
+                              Text(
+                                  text = annotatedPageText,
+                                  fontSize = 22.sp,
+                                  lineHeight = 40.sp,
+                                  textAlign = TextAlign.Center,
+                                  modifier = Modifier.fillMaxWidth()
+                              )
+                          }
+                      }
+                  }
+
+                  Column(
+                      modifier = Modifier
+                          .fillMaxWidth()
+                          .padding(top = 6.dp),
+                      verticalArrangement = Arrangement.spacedBy(6.dp)
+                  ) {
+                      Row(
+                          modifier = Modifier.fillMaxWidth(),
+                          horizontalArrangement = Arrangement.spacedBy(6.dp)
+                      ) {
+                          Button(
+                              onClick = {
+                                  isRecitationMode = true
+                                  if (userWantsListening) {
+                                      userWantsListening = false
+                                      isSheikhSpeaking = false
+                                      mainHandler.removeCallbacksAndMessages(null)
+                                      speechRecognizer?.stopListening()
+                                      ttsEngine?.stop()
+                                      mediaPlayer?.stop()
+                                      setSystemMicBeepMuted(context, false)
+                                      statusMessage = "تم إيقاف جلسة التسميع"
+                                  } else {
+                                      val perm = ContextCompat.checkSelfPermission(
+                                          context,
+                                          Manifest.permission.RECORD_AUDIO
+                                      )
+                                      if (perm == PackageManager.PERMISSION_GRANTED) {
+                                          hasErrorStop = false
+                                          mistakeCountAtCurrentWord = 0
+                                          knockedWordIndex = -1
+                                          userWantsListening = true
+                                          startRecognizerCycle()
+                                      } else {
+                                          permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                      }
+                                  }
+                              },
+                              modifier = Modifier
+                                  .weight(1f)
+                                  .height(36.dp),
+                              contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                              colors = ButtonDefaults.buttonColors(
+                                  containerColor = if (userWantsListening) Color(0xFFC0392B) else Color(0xFF1E8449)
+                              )
+                          ) {
+                              Text(
+                                  text = if (userWantsListening) "إيقاف التسميع" else "ابدأ التسميع مع الشيخ",
+                                  fontSize = 12.sp,
+                                  fontWeight = FontWeight.Bold,
+                                  maxLines = 1
+                              )
+                          }
+
+                          Button(
+                              onClick = {
+                                  isRecitationMode = true
+                                  if (revealedWordCount < allPageWords.size) {
+                                      val helpedWord = allPageWords[revealedWordCount]
+                                      revealedWordCount++
+                                      cycleStartWordCount = revealedWordCount
+                                      hasErrorStop = false
+                                      mistakeCountAtCurrentWord = 0
+                                      knockedWordIndex = -1
+                                      statusMessage = "فتح الشيخ (كلمة): « $helpedWord »"
+                                  } else {
+                                      statusMessage = "جميع كلمات هذه الصفحة ظاهرة بالفعل!"
+                                  }
+                              },
+                              modifier = Modifier
+                                  .weight(1f)
+                                  .height(36.dp),
+                              contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                              colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD35400))
+                          ) {
+                              Text(
+                                  text = "أكمل (كشف كلمة)",
+                                  fontSize = 12.sp,
+                                  fontWeight = FontWeight.Bold,
+                                  maxLines = 1
+                              )
+                          }
+                      }
+
+                      Row(
+                          modifier = Modifier.fillMaxWidth(),
+                          horizontalArrangement = Arrangement.spacedBy(6.dp)
+                      ) {
+                          Button(
+                              onClick = {
+                                  if (currentPageIndex > 0) currentPageIndex--
+                              },
+                              modifier = Modifier
+                                  .weight(1f)
+                                  .height(34.dp),
+                              contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                              colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1B4F72))
+                          ) {
+                              Text("الصفحة السابقة", fontSize = 11.sp, maxLines = 1)
+                          }
+
+                          Button(
+                              onClick = {
+                                  isRecitationMode = true
+                                  triggerSheikhReciteAyah()
+                              },
+                              modifier = Modifier
+                                  .weight(1f)
+                                  .height(34.dp),
+                              contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                              colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF8E44AD))
+                          ) {
+                              Text("تلقين الآية (بصوت الشيخ)", fontSize = 11.sp, maxLines = 1)
+                          }
+
+                          Button(
+                              onClick = {
+                                  if (currentPageIndex < pages.size - 1) currentPageIndex++
+                              },
+                              modifier = Modifier
+                                  .weight(1f)
+                                  .height(34.dp),
+                              contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                              colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1B4F72))
+                          ) {
+                              Text("الصفحة التالية", fontSize = 11.sp, maxLines = 1)
+                          }
+                      }
+                  }
+              }
+          }
+          EOF
+
+          cat << 'EOF' > clean_project/settings.gradle.kts
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "Mushafi"
+          include(":app")
+          EOF
+
+          cat << 'EOF' > clean_project/gradle.properties
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          EOF
+
+          cat << 'EOF' > clean_project/build.gradle.kts
+          plugins {
+              id("com.android.application") version "8.4.0" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+
+          cat << 'EOF' > clean_project/app/build.gradle.kts
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.example.mushafi"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.example.mushafi"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 5
+                  versionName = "5.0"
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+              buildFeatures {
+                  compose = true
+              }
+              composeOptions {
+                  kotlinCompilerExtensionVersion = "1.5.14"
+              }
+          }
+
+          dependencies {
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("androidx.appcompat:appcompat:1.7.0")
+              implementation("com.google.android.material:material:1.12.0")
+              implementation("androidx.activity:activity-compose:1.9.0")
+              implementation(platform("androidx.compose:compose-bom:2024.06.00"))
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.ui:ui-graphics")
+              implementation("androidx.compose.ui:ui-tooling-preview")
+              implementation("androidx.compose.material3:material3")
+          }
+          EOF
+
+          cat << 'EOF' > clean_project/app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+              <uses-permission android:name="android.permission.INTERNET" />
+
+              <queries>
+                  <intent>
+                      <action android:name="android.speech.RecognitionService" />
+                  </intent>
+                  <intent>
+                      <action android:name="android.intent.action.TTS_SERVICE" />
+                  </intent>
+              </queries>
+
+              <application
+                  android:allowBackup="true"
+                  android:icon="@mipmap/ic_launcher"
+                  android:roundIcon="@mipmap/ic_launcher_round"
+                  android:label="مصحفي"
+                  android:supportsRtl="true"
+                  android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build APK with Gradle
+        working-directory: clean_project
+        run: |
+          gradle :app:assembleDebug --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: clean_project/app/build/outputs/apk/debug/app-debug.apk

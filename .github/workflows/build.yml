@@ -34,15 +34,37 @@ jobs:
             cp clean_project/app/src/main/res/mipmap-xxhdpi/ic_launcher.png clean_project/app/src/main/res/mipmap-xxhdpi/ic_launcher_round.png
           fi
 
-          # تحميل وبناء قاعدة بيانات المصحف الكامل (604 صفحات - 30 جزءاً)
+          # تحميل المصحف الكامل ودمج علامات الوقف مع الكلمات لعدم احتسابها ككلمات مستقلة
           cat << 'EOF' > fetch_quran.py
           import urllib.request
           import json
+          import re
 
           url = "https://api.alquran.cloud/v1/quran/quran-simple"
           req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
           with urllib.request.urlopen(req, timeout=60) as response:
               data = json.loads(response.read().decode('utf-8'))
+
+          def has_arabic_letters(token):
+              return bool(re.search(r'[\u0621-\u064A\u0671]', token))
+
+          def clean_and_merge_pause_marks(text):
+              raw_tokens = text.strip().split()
+              merged = []
+              pending_prefix = ""
+              for token in raw_tokens:
+                  if has_arabic_letters(token):
+                      if pending_prefix:
+                          token = pending_prefix + " " + token
+                          pending_prefix = ""
+                      merged.append(token)
+                  else:
+                      # علامة وقف أو رمز قرآني مثل ۖ أو ۗ أو ۞: ندمجه مع الكلمة السابقة
+                      if merged:
+                          merged[-1] = merged[-1] + " " + token
+                      else:
+                          pending_prefix = token
+              return " ".join(merged), merged
 
           pages = {}
           for surah in data['data']['surahs']:
@@ -50,7 +72,7 @@ jobs:
               for ayah in surah['ayahs']:
                   p = ayah['page']
                   j = ayah['juz']
-                  text = ayah['text'].strip()
+                  cleaned_text, word_list = clean_and_merge_pause_marks(ayah['text'])
                   num = ayah['numberInSurah']
                   if p not in pages:
                       pages[p] = {
@@ -62,7 +84,8 @@ jobs:
                   pages[p]["ayahs"].append({
                       "s": surah_name,
                       "n": num,
-                      "t": text
+                      "t": cleaned_text,
+                      "w": word_list
                   })
 
           result = [pages[k] for k in sorted(pages.keys())]
@@ -73,7 +96,6 @@ jobs:
 
           python3 fetch_quran.py
 
-          # إنشاء الكود البرمجي الكامل للتطبيق مع التسميع الذكي وزر أكمل
           cat << 'EOF' > clean_project/app/src/main/java/com/example/mushafi/MainActivity.kt
           package com.example.mushafi
 
@@ -89,9 +111,11 @@ jobs:
           import androidx.activity.compose.setContent
           import androidx.activity.result.contract.ActivityResultContracts
           import androidx.compose.foundation.background
+          import androidx.compose.foundation.border
           import androidx.compose.foundation.layout.*
           import androidx.compose.foundation.rememberScrollState
           import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.foundation.text.BasicTextField
           import androidx.compose.foundation.text.KeyboardOptions
           import androidx.compose.foundation.verticalScroll
           import androidx.compose.material3.*
@@ -100,8 +124,10 @@ jobs:
           import androidx.compose.ui.Modifier
           import androidx.compose.ui.graphics.Color
           import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.platform.LocalFocusManager
           import androidx.compose.ui.platform.LocalLayoutDirection
           import androidx.compose.ui.text.SpanStyle
+          import androidx.compose.ui.text.TextStyle
           import androidx.compose.ui.text.buildAnnotatedString
           import androidx.compose.ui.text.font.FontWeight
           import androidx.compose.ui.text.input.KeyboardType
@@ -112,7 +138,6 @@ jobs:
           import androidx.compose.ui.unit.sp
           import androidx.core.content.ContextCompat
           import org.json.JSONArray
-          import java.util.Locale
 
           data class AyahItem(
               val surahName: String,
@@ -130,7 +155,6 @@ jobs:
 
           fun normalizeArabicWord(input: String): String {
               var s = input.trim()
-              // إزالة التشكيل والرموز القرآنية للمطابقة الذكية
               s = s.replace(Regex("[\\u0610-\\u061A\\u064B-\\u065F\\u0670\\u06D6-\\u06ED\\u0640]"), "")
               s = s.replace(Regex("[أإآٱ]"), "ا")
               s = s.replace("ة", "ه")
@@ -181,7 +205,26 @@ jobs:
                           for (j in 0 until ayahsArr.length()) {
                               val aObj = ayahsArr.getJSONObject(j)
                               val rawText = aObj.getString("t")
-                              val words = rawText.split(Regex("\\s+")).filter { it.isNotBlank() }
+                              val wordsArr = aObj.optJSONArray("w")
+                              val words = mutableListOf<String>()
+                              if (wordsArr != null) {
+                                  for (k in 0 until wordsArr.length()) {
+                                      val w = wordsArr.getString(k)
+                                      if (normalizeArabicWord(w).isNotEmpty()) {
+                                          words.add(w)
+                                      } else if (words.isNotEmpty()) {
+                                          words[words.lastIndex] = words.last() + " " + w
+                                      }
+                                  }
+                              } else {
+                                  for (token in rawText.split(Regex("\\s+")).filter { it.isNotBlank() }) {
+                                      if (normalizeArabicWord(token).isNotEmpty()) {
+                                          words.add(token)
+                                      } else if (words.isNotEmpty()) {
+                                          words[words.lastIndex] = words.last() + " " + token
+                                      }
+                                  }
+                              }
                               ayahList.add(
                                   AyahItem(
                                       surahName = aObj.getString("s"),
@@ -208,13 +251,48 @@ jobs:
           }
 
           @Composable
+          fun NumberInputBox(
+              value: String,
+              onValueChange: (String) -> Unit,
+              modifier: Modifier = Modifier
+          ) {
+              Box(
+                  modifier = modifier
+                      .height(40.dp)
+                      .background(Color.White, RoundedCornerShape(8.dp))
+                      .border(1.dp, Color(0xFFA9DFBF), RoundedCornerShape(8.dp))
+                      .padding(horizontal = 8.dp),
+                  contentAlignment = Alignment.Center
+              ) {
+                  BasicTextField(
+                      value = value,
+                      onValueChange = { newVal ->
+                          if (newVal.all { it.isDigit() } && newVal.length <= 3) {
+                              onValueChange(newVal)
+                          }
+                      },
+                      singleLine = true,
+                      keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                      textStyle = TextStyle(
+                          color = Color(0xFF1B4F72),
+                          fontSize = 18.sp,
+                          fontWeight = FontWeight.Bold,
+                          textAlign = TextAlign.Center
+                      ),
+                      modifier = Modifier.fillMaxWidth()
+                  )
+              }
+          }
+
+          @Composable
           fun QuranSmartScreen(pages: List<QuranPageData>) {
               val context = LocalContext.current
+              val focusManager = LocalFocusManager.current
+
               var currentPageIndex by remember { mutableStateOf(0) }
               var pageInputText by remember { mutableStateOf("1") }
               var juzInputText by remember { mutableStateOf("1") }
 
-              // وضع التسميع والاختبار الذكي
               var isRecitationMode by remember { mutableStateOf(true) }
               var revealedWordCount by remember { mutableStateOf(0) }
               var hasErrorStop by remember { mutableStateOf(false) }
@@ -228,18 +306,16 @@ jobs:
                   currentPage?.ayahs?.flatMap { it.words } ?: emptyList()
               }
 
-              // إعادة ضبط العداد عند تغيير الصفحة
               LaunchedEffect(currentPageIndex) {
                   revealedWordCount = 0
                   hasErrorStop = false
                   if (currentPage != null) {
                       pageInputText = currentPage.page.toString()
                       juzInputText = currentPage.juz.toString()
-                      statusMessage = "صفحة ${currentPage.page} (${currentPage.surah} - الجزء ${currentPage.juz})"
+                      statusMessage = "أنت الآن في ${currentPage.surah} - صفحة ${currentPage.page} (الجزء ${currentPage.juz})"
                   }
               }
 
-              // إعداد محرك التعرف على الصوت في أندرويد
               val speechRecognizer = remember {
                   if (SpeechRecognizer.isRecognitionAvailable(context)) {
                       SpeechRecognizer.createSpeechRecognizer(context)
@@ -254,11 +330,20 @@ jobs:
 
               fun processSpokenText(spokenSentence: String) {
                   if (allPageWords.isEmpty() || revealedWordCount >= allPageWords.size) return
-                  val spokenWords = spokenSentence.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+                  val spokenWords = spokenSentence.trim()
+                      .split(Regex("\\s+"))
+                      .filter { normalizeArabicWord(it).isNotEmpty() }
                   if (spokenWords.isEmpty()) return
 
                   var matchedAny = false
                   for (sw in spokenWords) {
+                      // تخطي أي رمز غير حرفي احتياطياً
+                      while (revealedWordCount < allPageWords.size &&
+                          normalizeArabicWord(allPageWords[revealedWordCount]).isEmpty()
+                      ) {
+                          revealedWordCount++
+                      }
+
                       if (revealedWordCount < allPageWords.size) {
                           val expectedWord = allPageWords[revealedWordCount]
                           if (wordsMatch(expectedWord, sw)) {
@@ -266,18 +351,17 @@ jobs:
                               matchedAny = true
                               hasErrorStop = false
                           } else {
-                              // رصد خطأ أو تخطي كلمة/آية -> توقف فوري!
                               hasErrorStop = true
                               isListening = false
                               speechRecognizer?.stopListening()
-                              statusMessage = "توقف! نطقت ($sw) في غير موضعها أو تخطيت كلمة. صحح التلاوة أو اضغط (أكمل)"
+                              statusMessage = "توقف! سمعت ($sw) في غير موضعها. أعد الكلمة أو اضغط (أكمل)"
                               return
                           }
                       }
                   }
                   if (matchedAny) {
                       if (revealedWordCount >= allPageWords.size) {
-                          statusMessage = "أحسنت! أتممت تلاوة هذه الصفحة بالكامل بنجاح."
+                          statusMessage = "ما شاء الله! أتممت تلاوة هذه الصفحة بالكامل بنجاح."
                           isListening = false
                       } else {
                           statusMessage = "تلاوة صحيحة.. تابع القراءة"
@@ -287,7 +371,7 @@ jobs:
 
               fun startListeningSession() {
                   if (speechRecognizer == null) {
-                      statusMessage = "جهازك لا يدعم خدمة التعرف الصوتي المباشر، يمكنك المتابعة بزر (أكمل)"
+                      statusMessage = "جهازك لا يدعم التعرف الصوتي المباشر، يمكنك المتابعة بزر (أكمل)"
                       return
                   }
                   val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
@@ -308,7 +392,7 @@ jobs:
                       override fun onError(error: Int) {
                           isListening = false
                           if (!hasErrorStop) {
-                              statusMessage = "توقف الاستماع الميكروفوني. اضغط (استماع) للمتابعة أو (أكمل) للمساعدة"
+                              statusMessage = "توقف الميكروفون مؤقتاً. اضغط (استماع) للمتابعة أو (أكمل) للمساعدة"
                           }
                       }
                       override fun onResults(results: Bundle?) {
@@ -338,10 +422,10 @@ jobs:
               Column(
                   modifier = Modifier
                       .fillMaxSize()
-                      .padding(12.dp),
+                      .padding(10.dp),
                   verticalArrangement = Arrangement.SpaceBetween
               ) {
-                  // الشريط العلوي: تحديد الصفحة أو الجزء
+                  // لوحة التحكم العلوية المرتبة والواضحة
                   Card(
                       modifier = Modifier.fillMaxWidth(),
                       colors = CardDefaults.cardColors(containerColor = Color(0xFF1B4F72)),
@@ -351,6 +435,7 @@ jobs:
                           modifier = Modifier.padding(12.dp),
                           verticalArrangement = Arrangement.spacedBy(8.dp)
                       ) {
+                          // السطر الأول: عنوان التطبيق + زر تبديل الوضع
                           Row(
                               modifier = Modifier.fillMaxWidth(),
                               horizontalArrangement = Arrangement.SpaceBetween,
@@ -359,86 +444,118 @@ jobs:
                               Text(
                                   text = "مصحفي الذكي",
                                   color = Color.White,
-                                  fontSize = 20.sp,
+                                  fontSize = 19.sp,
                                   fontWeight = FontWeight.Bold
                               )
-                              TextButton(
-                                  onClick = { isRecitationMode = !isRecitationMode }
+                              Button(
+                                  onClick = { isRecitationMode = !isRecitationMode },
+                                  colors = ButtonDefaults.buttonColors(
+                                      containerColor = if (isRecitationMode) Color(0xFF117864) else Color(0xFF2874A6)
+                                  ),
+                                  contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                  modifier = Modifier.height(34.dp)
                               ) {
                                   Text(
                                       text = if (isRecitationMode) "الوضع: تسميع واختبار" else "الوضع: قراءة كاملة",
-                                      color = Color(0xFFA9DFBF),
+                                      color = Color.White,
+                                      fontSize = 12.sp,
                                       fontWeight = FontWeight.Bold
                                   )
                               }
                           }
 
+                          // شريط واضح يبين موقعك الحالي بالضبط
+                          if (currentPage != null) {
+                              Box(
+                                  modifier = Modifier
+                                      .fillMaxWidth()
+                                      .background(Color(0xFF154360), RoundedCornerShape(6.dp))
+                                      .padding(vertical = 4.dp, horizontal = 8.dp),
+                                  contentAlignment = Alignment.Center
+                              ) {
+                                  Text(
+                                      text = "الموقع الحالي: ${currentPage.surah} | صفحة ${currentPage.page} من 604 | الجزء ${currentPage.juz}",
+                                      color = Color(0xFFA9DFBF),
+                                      fontSize = 13.sp,
+                                      fontWeight = FontWeight.Bold
+                                  )
+                              }
+                          }
+
+                          // السطر الثاني: الانتقال السريع للصفحة
                           Row(
                               modifier = Modifier.fillMaxWidth(),
-                              horizontalArrangement = Arrangement.spacedBy(6.dp),
+                              horizontalArrangement = Arrangement.spacedBy(8.dp),
                               verticalAlignment = Alignment.CenterVertically
                           ) {
-                              OutlinedTextField(
+                              Text(
+                                  text = "رقم الصفحة (1-604):",
+                                  color = Color.White,
+                                  fontSize = 13.sp,
+                                  fontWeight = FontWeight.Bold,
+                                  modifier = Modifier.width(125.dp)
+                              )
+                              NumberInputBox(
                                   value = pageInputText,
                                   onValueChange = { pageInputText = it },
-                                  label = { Text("الصفحة (1-604)", color = Color.White, fontSize = 11.sp) },
-                                  keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                  singleLine = true,
-                                  modifier = Modifier.weight(1f),
-                                  colors = OutlinedTextFieldDefaults.colors(
-                                      focusedTextColor = Color.White,
-                                      unfocusedTextColor = Color.White,
-                                      focusedBorderColor = Color(0xFFA9DFBF),
-                                      unfocusedBorderColor = Color.LightGray
-                                  )
+                                  modifier = Modifier.weight(1f)
                               )
                               Button(
                                   onClick = {
+                                      focusManager.clearFocus()
                                       val targetPage = pageInputText.toIntOrNull()
                                       if (targetPage != null && targetPage in 1..pages.size) {
                                           currentPageIndex = targetPage - 1
                                       } else {
-                                          statusMessage = "يرجى إدخال رقم صفحة صحيح بين 1 و 604"
+                                          statusMessage = "أدخل رقم صفحة صحيح بين 1 و 604"
                                       }
                                   },
-                                  colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2874A6))
+                                  colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2874A6)),
+                                  modifier = Modifier.height(40.dp)
                               ) {
-                                  Text("انتقال للصفحة", fontSize = 12.sp)
+                                  Text("اذهب للصفحة", fontSize = 13.sp, fontWeight = FontWeight.Bold)
                               }
+                          }
 
-                              OutlinedTextField(
+                          // السطر الثالث: الانتقال السريع للجزء
+                          Row(
+                              modifier = Modifier.fillMaxWidth(),
+                              horizontalArrangement = Arrangement.spacedBy(8.dp),
+                              verticalAlignment = Alignment.CenterVertically
+                          ) {
+                              Text(
+                                  text = "رقم الجزء (1-30):",
+                                  color = Color.White,
+                                  fontSize = 13.sp,
+                                  fontWeight = FontWeight.Bold,
+                                  modifier = Modifier.width(125.dp)
+                              )
+                              NumberInputBox(
                                   value = juzInputText,
                                   onValueChange = { juzInputText = it },
-                                  label = { Text("الجزء (1-30)", color = Color.White, fontSize = 11.sp) },
-                                  keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                  singleLine = true,
-                                  modifier = Modifier.weight(1f),
-                                  colors = OutlinedTextFieldDefaults.colors(
-                                      focusedTextColor = Color.White,
-                                      unfocusedTextColor = Color.White,
-                                      focusedBorderColor = Color(0xFFA9DFBF),
-                                      unfocusedBorderColor = Color.LightGray
-                                  )
+                                  modifier = Modifier.weight(1f)
                               )
                               Button(
                                   onClick = {
+                                      focusManager.clearFocus()
                                       val targetJuz = juzInputText.toIntOrNull()
                                       if (targetJuz != null && targetJuz in 1..30) {
                                           val foundIndex = pages.indexOfFirst { it.juz == targetJuz }
                                           if (foundIndex >= 0) currentPageIndex = foundIndex
                                       } else {
-                                          statusMessage = "يرجى إدخال رقم جزء صحيح بين 1 و 30"
+                                          statusMessage = "أدخل رقم جزء صحيح بين 1 و 30"
                                       }
                                   },
-                                  colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2874A6))
+                                  colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2874A6)),
+                                  modifier = Modifier.height(40.dp)
                               ) {
-                                  Text("انتقال للجزء", fontSize = 12.sp)
+                                  Text("اذهب للجزء", fontSize = 13.sp, fontWeight = FontWeight.Bold)
                               }
                           }
                       }
                   }
 
-                  // شريط التنبيهات والحالة (أحمر عند الخطأ، أخضر عند المتابعة)
+                  // شريط التنبيهات والحالة
                   Card(
                       modifier = Modifier
                           .fillMaxWidth()
@@ -451,9 +568,9 @@ jobs:
                           text = statusMessage,
                           modifier = Modifier
                               .fillMaxWidth()
-                              .padding(10.dp),
+                              .padding(8.dp),
                           color = if (hasErrorStop) Color(0xFFC0392B) else Color(0xFF117864),
-                          fontSize = 14.sp,
+                          fontSize = 13.sp,
                           fontWeight = FontWeight.Bold,
                           textAlign = TextAlign.Center
                       )
@@ -477,20 +594,11 @@ jobs:
                           horizontalAlignment = Alignment.CenterHorizontally
                       ) {
                           if (currentPage != null) {
-                              Text(
-                                  text = "${currentPage.surah} - صفحة ${currentPage.page} (الجزء ${currentPage.juz})",
-                                  fontSize = 16.sp,
-                                  fontWeight = FontWeight.Bold,
-                                  color = Color(0xFF1B4F72),
-                                  modifier = Modifier.padding(bottom = 12.dp)
-                              )
-
                               val annotatedPageText = buildAnnotatedString {
                                   var globalWordIndex = 0
                                   for (ayah in currentPage.ayahs) {
                                       for (word in ayah.words) {
                                           if (!isRecitationMode || globalWordIndex < revealedWordCount) {
-                                              // كلمة مقروءة أو في وضع القراءة الكاملة
                                               withStyle(
                                                   SpanStyle(
                                                       color = Color(0xFF1E8449),
@@ -500,7 +608,6 @@ jobs:
                                                   append("$word ")
                                               }
                                           } else if (globalWordIndex == revealedWordCount && hasErrorStop) {
-                                              // موضع التوقف بسبب خطأ أو تخطي
                                               withStyle(
                                                   SpanStyle(
                                                       color = Color(0xFFC0392B),
@@ -511,7 +618,6 @@ jobs:
                                                   append("[؟] ")
                                               }
                                           } else {
-                                              // كلمات مخفية بانتظار التلاوة أو الضغط على زر أكمل
                                               withStyle(
                                                   SpanStyle(color = Color(0xFFBDC3C7))
                                               ) {
@@ -533,8 +639,8 @@ jobs:
 
                               Text(
                                   text = annotatedPageText,
-                                  fontSize = 23.sp,
-                                  lineHeight = 42.sp,
+                                  fontSize = 22.sp,
+                                  lineHeight = 40.sp,
                                   textAlign = TextAlign.Center,
                                   modifier = Modifier.fillMaxWidth()
                               )
@@ -542,7 +648,7 @@ jobs:
                       }
                   }
 
-                  // أزرار التحكم السفلية: استماع، أكمل (كلمة / آية)، التنقل بين الصفحات
+                  // الأزرار السفلية
                   Column(
                       modifier = Modifier
                           .fillMaxWidth()
@@ -553,7 +659,6 @@ jobs:
                           modifier = Modifier.fillMaxWidth(),
                           horizontalArrangement = Arrangement.spacedBy(8.dp)
                       ) {
-                          // زر التسميع الصوتي
                           Button(
                               onClick = {
                                   isRecitationMode = true
@@ -580,15 +685,19 @@ jobs:
                           ) {
                               Text(
                                   text = if (isListening) "إيقاف الميكروفون" else "ابدأ التسميع بالصوت",
-                                  fontSize = 14.sp,
+                                  fontSize = 13.sp,
                                   fontWeight = FontWeight.Bold
                               )
                           }
 
-                          // زر أكمل (لكشف الكلمة التالية عند التوقف أو النسيان)
                           Button(
                               onClick = {
                                   isRecitationMode = true
+                                  while (revealedWordCount < allPageWords.size &&
+                                      normalizeArabicWord(allPageWords[revealedWordCount]).isEmpty()
+                                  ) {
+                                      revealedWordCount++
+                                  }
                                   if (revealedWordCount < allPageWords.size) {
                                       val helpedWord = allPageWords[revealedWordCount]
                                       revealedWordCount++
@@ -603,7 +712,7 @@ jobs:
                           ) {
                               Text(
                                   text = "أكمل (كشف الكلمة)",
-                                  fontSize = 14.sp,
+                                  fontSize = 13.sp,
                                   fontWeight = FontWeight.Bold
                               )
                           }
@@ -620,12 +729,11 @@ jobs:
                               modifier = Modifier.weight(1f),
                               colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1B4F72))
                           ) {
-                              Text("الصفحة السابقة")
+                              Text("الصفحة السابقة", fontSize = 12.sp)
                           }
 
                           Button(
                               onClick = {
-                                  // زر أكمل آية كاملة
                                   if (currentPage != null) {
                                       isRecitationMode = true
                                       var count = 0
@@ -643,7 +751,7 @@ jobs:
                               modifier = Modifier.weight(1f),
                               colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF8E44AD))
                           ) {
-                              Text("أكمل الآية")
+                              Text("أكمل الآية", fontSize = 12.sp)
                           }
 
                           Button(
@@ -653,7 +761,7 @@ jobs:
                               modifier = Modifier.weight(1f),
                               colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1B4F72))
                           ) {
-                              Text("الصفحة التالية")
+                              Text("الصفحة التالية", fontSize = 12.sp)
                           }
                       }
                   }
@@ -707,8 +815,8 @@ jobs:
                   applicationId = "com.example.mushafi"
                   minSdk = 24
                   targetSdk = 34
-                  versionCode = 2
-                  versionName = "2.0"
+                  versionCode = 3
+                  versionName = "3.0"
               }
 
               buildTypes {
